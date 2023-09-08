@@ -1,0 +1,471 @@
+---
+title: "vedo2_biopsies_check_alternative_integrins_DE_MAST_heatmap"
+output: html_document
+date: "2023-03-23"
+---
+
+```{r header, include=FALSE}
+#################################################################################################################
+# Title: "vedo2_biopsies_check_alternative_integrins_DE_MAST_heatmap"
+# Function: check the alternative integrins expression differential expression (alpha E, alpha L, 
+# alpha M, alpha X, beta 1, beta 2) in vedo2 scRNA-seq biopsies using MAST method
+# Date: "11-10-2022"
+# Run the script in gearshift cluster
+#################################################################################################################
+```
+
+
+```{r libraries, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+####################
+# libraries        
+####################
+
+library(Seurat)
+library(ggplot2)
+library(openxlsx)
+library(dplyr) 
+library(tidyr) 
+library(stringr)
+library(patchwork)
+library(grid)
+library(gridExtra) 
+library(ggpubr)
+library(forcats)
+library(tidyverse)
+library(reshape2)
+```
+
+
+```{r functions, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+####################
+# Functions        
+####################
+
+# perform MAST as implemented in Seurat, for each cell type
+perform_seurat_mast_per_celltype <- function(seurat_object, assay, condition_column, condition, cell_type_column, comparsion_column, ident.1, ident.2,  cell_types_to_consider=NULL, min.pct, slot, features, logfc.threshold){
+  
+  # set the assay
+  DefaultAssay(seurat_object) <- assay
+  
+  # select condition
+  seurat_object <- seurat_object[, seurat_object@meta.data[[condition_column]]  == condition]
+  
+  # check the overlapping cell types
+  cell_types <- unique(seurat_object@meta.data[[cell_type_column]])
+  if(!is.null(cell_types_to_consider)){
+    cell_types <- intersect(cell_types, cell_types_to_consider)
+  }
+  # Create a new data.frame
+  all_mast_result_0.05 <- data.frame()
+  # check each cell type
+  for(cell_type in cell_types){
+    # get a safe file name
+    cell_type_safe <- gsub(' |/', '_', cell_type)
+    cell_type_safe <- gsub('-', '_negative', cell_type_safe)
+    cell_type_safe <- gsub('\\+', '_positive', cell_type_safe)
+    cell_type_safe <- gsub('\\)', '', cell_type_safe)
+    cell_type_safe <- gsub('\\(', '', cell_type_safe)
+    
+    # subset to the cell type
+    seurat_object_celltype <- seurat_object[, seurat_object@meta.data[[cell_type_column]] == cell_type]
+    # set the identity for the Seurat object
+    Idents(seurat_object_celltype) <- comparsion_column
+    # try to do the differential expression (might fail if too few cells)
+    tryCatch(
+      {
+        # perform the analysis
+        mast_result <- FindMarkers(seurat_object_celltype, ident.1 = ident.1, ident.2 = ident.2,
+                                   test.use = 'MAST', assay = assay, min.pct = min.pct, 
+                                   slot = slot, features = features, logfc.threshold = logfc.threshold)
+        print(head(mast_result))
+        # add our only mtc if features were selected. Seurat does Bonferroni correction by multiplying the nominal P-value by the number of genes. when we select the genes to test, this is incorrect.
+        if (!is.null(features) & length(features) > 0) {
+          mast_result[['bonferroni']] <- p.adjust(mast_result[['p_val']], method = 'bonferroni')
+          mast_result[['BH']] <- p.adjust(mast_result[['p_val']], method = 'BH')
+        }
+        # select significant results
+        mast_result_0.05 <- filter(mast_result, mast_result[['BH']] < 0.05)
+        mast_result_0.05$celltype <- cell_type
+        mast_result_0.05$integrin <- rownames(mast_result_0.05)
+        
+        # add mast_result_0.05 to all_mast_result_0.05
+        all_mast_result_0.05 <- rbind(all_mast_result_0.05, mast_result_0.05)
+        
+      },
+      error=function(cond) {
+        # print why we fail
+        print(paste('DE failed for', cell_type, ident.1, 'vs', ident.2, ':', cond))
+      }
+    )
+  }
+  return(all_mast_result_0.05)
+}
+
+# Define function to create a heatmap
+alternative_integrin_list <- function(data) {
+  
+  # convert column avg_log2FC as numeric
+  data$avg_log2FC <- as.numeric(data$avg_log2FC)
+  # split alternative integrin
+  data_ITGA1 <- data %>% 
+    filter(integrin == "ITGA1") %>% 
+    select(avg_log2FC, celltype, integrin)
+  data_ITGA3 <- data %>% 
+    filter(integrin == "ITGA3") %>% 
+    select(avg_log2FC, celltype, integrin)
+  data_ITGAE <- data %>% 
+    filter(integrin == "ITGAE") %>% 
+    select(avg_log2FC, celltype, integrin)
+  data_ITGAL <- data %>% 
+    filter(integrin == "ITGAL") %>% 
+    select(avg_log2FC, celltype, integrin)
+  data_ITGAM <- data %>% 
+    filter(integrin == "ITGAM") %>% 
+    select(avg_log2FC, celltype, integrin)
+  data_ITGAX <- data %>% 
+    filter(integrin == "ITGAX") %>% 
+    select(avg_log2FC, celltype, integrin)
+  data_ITGB1 <- data %>% 
+    filter(integrin == "ITGB1") %>% 
+    select(avg_log2FC, celltype, integrin) 
+  data_ITGB2 <- data %>% 
+    filter(integrin == "ITGB2") %>% 
+    select(avg_log2FC, celltype, integrin) 
+  # return all of them as a list
+  return(list(data_ITGA1, data_ITGA3, data_ITGAE, data_ITGAL, data_ITGAM, data_ITGAX, data_ITGB1, data_ITGB2))
+}
+
+# Define a function to rename columns of data frames
+rename_columns <- function(data, suffix) {
+  alternative_integrin_data <- alternative_integrin_list(data)
+  new_names_A1_avg_log2FC <- paste0("avg_log2FC_", suffix, "_A1")
+  new_names_A1_integrin <- paste0("integrin_", suffix, "_A1")
+  new_names_A3_avg_log2FC <- paste0("avg_log2FC_", suffix, "_A3")
+  new_names_A3_integrin <- paste0("integrin_", suffix, "_A3")
+  new_names_AE_avg_log2FC <- paste0("avg_log2FC_", suffix, "_AE")
+  new_names_AE_integrin <- paste0("integrin_", suffix, "_AE")
+  new_names_AL_avg_log2FC <- paste0("avg_log2FC_", suffix, "_AL")
+  new_names_AL_integrin <- paste0("integrin_", suffix, "_AL")
+  new_names_AM_avg_log2FC <- paste0("avg_log2FC_", suffix, "_AM")
+  new_names_AM_integrin <- paste0("integrin_", suffix, "_AM")
+  new_names_AX_avg_log2FC <- paste0("avg_log2FC_", suffix, "_AX")
+  new_names_AX_integrin <- paste0("integrin_", suffix, "_AX")
+  new_names_B1_avg_log2FC <- paste0("avg_log2FC_", suffix, "_B1")
+  new_names_B1_integrin <- paste0("integrin_", suffix, "_B1")
+  new_names_B2_avg_log2FC <- paste0("avg_log2FC_", suffix, "_B2")
+  new_names_B2_integrin <- paste0("integrin_", suffix, "_B2")
+  
+  colnames(alternative_integrin_data[[1]]) <- c(new_names_A1_avg_log2FC, "celltype", new_names_A1_integrin)
+  colnames(alternative_integrin_data[[2]]) <- c(new_names_A3_avg_log2FC, "celltype", new_names_A3_integrin)
+  colnames(alternative_integrin_data[[3]]) <- c(new_names_AE_avg_log2FC, "celltype", new_names_AE_integrin)
+  colnames(alternative_integrin_data[[4]]) <- c(new_names_AL_avg_log2FC, "celltype", new_names_AL_integrin)
+  colnames(alternative_integrin_data[[5]]) <- c(new_names_AM_avg_log2FC, "celltype", new_names_AM_integrin)
+  colnames(alternative_integrin_data[[6]]) <- c(new_names_AX_avg_log2FC, "celltype", new_names_AX_integrin)
+  colnames(alternative_integrin_data[[7]]) <- c(new_names_B1_avg_log2FC, "celltype", new_names_B1_integrin)
+  colnames(alternative_integrin_data[[8]]) <- c(new_names_B2_avg_log2FC, "celltype", new_names_B2_integrin)
+  return(alternative_integrin_data)
+}
+
+# Define a function to generate new data boxes and add grouping variables
+create_grouped_data <- function(data, avg_log2FC_colname, integrin_colname, breaks) {
+  new_df <- data %>% 
+    select(celltype, !!sym(avg_log2FC_colname), !!sym(integrin_colname)) %>% 
+    rename(avg_log2FC = !!sym(avg_log2FC_colname), integrin = !!sym(integrin_colname))
+  new_df$group <- cut(new_df$avg_log2FC, breaks = breaks)
+  return(new_df)
+}
+
+# Define a function to create a heatmap1 
+heatmap_1 <- function(data, colors) {
+  
+  plot <- data %>% 
+    ggplot(aes(x = integrin, y = celltype, fill = factor(group))) +
+    coord_fixed(ratio = 1) +
+    geom_tile() +
+    scale_fill_manual(
+      breaks = levels(data$group),
+      values = colors
+    ) +
+    ggtitle('')  +
+    geom_tile(colour = 'white') +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+    labs(y = NULL, x = NULL) +
+    guides(fill = guide_legend(title = "log2MD")) +
+    theme(panel.border = element_rect(color = "black", fill = NA, size = 1.1), 
+          panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+          panel.background = element_blank(), strip.background = element_rect(colour = "white", fill = "white"),
+          legend.spacing.y = unit(0.5, 'cm'))
+  
+  return(plot)
+}
+
+# Define a function to create a heatmap1 
+heatmap_2 <- function(data, colors) {
+  
+  plot <- data %>% 
+    ggplot(aes(x = integrin, y = celltype, fill = factor(group))) +
+    coord_fixed(ratio = 1) +
+    geom_tile() +
+    scale_fill_manual(
+      breaks = levels(data$group),
+      values = colors
+    ) +
+    ggtitle('')  +
+    geom_tile(colour = 'white') +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+    labs(y = NULL, x = NULL) +
+    guides(fill = guide_legend(title = "log2MD")) +
+    theme(axis.text.y=element_blank(), legend.position="right") +
+    theme(panel.border = element_rect(color = "black", fill = NA, size = 1.1), 
+          panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+          panel.background = element_blank(), strip.background = element_rect(colour = "white", fill = "white"),
+          legend.spacing.y = unit(0.5, 'cm'))
+  
+  return(plot)
+}
+# The difference between heatmap_1 and heatmap_2: there is no y axis text in heatmap_2
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+####################
+# Main Code        #
+####################
+
+# the integrins to check for DE
+integrins <- c(
+  'ITGB1',
+  'ITGB2',
+  'ITGAM',
+  'ITGA1',
+  'ITGA3',
+  'ITGA4',
+  'ITGB7',
+  'ITGAE',
+  'ITGAL',
+  'ITGAX',
+  'PECAM1',
+  'CDH1',
+  'FN1',
+  'VCAM1',
+  'ICAM1',
+  'MADCAM1'
+)
+
+################
+# main codes
+################
+
+# Set seed
+set.seed(1234)
+
+# Set location of output
+output_loc <- "/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/integrin_DE_MAST_heatmap/"
+
+# set the location of the vedo2 pbmc dataset
+vedo2_scRNA_biopsy_loc <- '/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/cell_type_classification/objects/vedo2_102022_rsct.rds'
+
+# read the object
+vedo2_scRNA_biopsy <- readRDS(vedo2_scRNA_biopsy_loc)
+
+# Subset immune compartment
+vedo2_scRNA_biopsy_immune <- subset(vedo2_scRNA_biopsy, subset = (compartment %in% "immune"))
+
+# Analyze 4 comparisons and generate significant results
+# before_nonresponders vs before_responders (before_responders as reference)
+beforeNR_vs_beforeR_integrin <- perform_seurat_mast_per_celltype(seurat_object = vedo2_scRNA_biopsy_immune, 
+                                                                 assay = 'RNA',
+                                                                 condition_column = "timepoint", 
+                                                                 condition = "T0", 
+                                                                 cell_type_column = "cell_type_final", 
+                                                                 comparsion_column = "PGA._resp", 
+                                                                 ident.1 = "no", 
+                                                                 ident.2 = "yes", 
+                                                                 min.pct = 0,
+                                                                 slot = "data", 
+                                                                 features = integrins, 
+                                                                 logfc.threshold = 0)
+
+# after_nonresponders vs after_responders (after_responders as reference)
+afterNR_vs_afterR_integrin <- perform_seurat_mast_per_celltype(seurat_object = vedo2_scRNA_biopsy_immune, 
+                                                               assay = 'RNA',
+                                                               condition_column = "timepoint", 
+                                                               condition = "T4", 
+                                                               cell_type_column = "cell_type_final", 
+                                                               comparsion_column = "PGA._resp", 
+                                                               ident.1 = "no", 
+                                                               ident.2 = "yes", 
+                                                               min.pct = 0,
+                                                               slot = "data", 
+                                                               features = integrins, 
+                                                               logfc.threshold = 0)
+
+# after_responders vs before_responders (before_responders as reference)
+afterR_vs_beforeR_integrin <- perform_seurat_mast_per_celltype(seurat_object = vedo2_scRNA_biopsy_immune, 
+                                                               assay = 'RNA',
+                                                               condition_column = "PGA._resp", 
+                                                               condition = "yes", 
+                                                               cell_type_column = "cell_type_final", 
+                                                               comparsion_column = "timepoint", 
+                                                               ident.1 = "T4", 
+                                                               ident.2 = "T0", 
+                                                               min.pct = 0,
+                                                               slot = "data", 
+                                                               features = integrins, 
+                                                               logfc.threshold = 0)
+
+
+# after_nonresponders vs before_nonresponders (before_nonresponders as reference)
+afterNR_vs_beforeNR_integrin <- perform_seurat_mast_per_celltype(seurat_object = vedo2_scRNA_biopsy_immune, 
+                                                                 assay = 'RNA',
+                                                                 condition_column = "PGA._resp", 
+                                                                 condition = "no", 
+                                                                 cell_type_column = "cell_type_final", 
+                                                                 comparsion_column = "timepoint", 
+                                                                 ident.1 = "T4", 
+                                                                 ident.2 = "T0", 
+                                                                 min.pct = 0,
+                                                                 slot = "data", 
+                                                                 features = integrins, 
+                                                                 logfc.threshold = 0)
+
+# Combine data frames into a list
+data <- list(afterR_vs_beforeR_integrin, afterNR_vs_beforeNR_integrin, beforeNR_vs_beforeR_integrin, afterNR_vs_afterR_integrin)
+
+# Rename columns of all data frames
+suffixes <- c("afterR_vs_beforeR", "afterNR_vs_beforeNR", "beforeNR_vs_beforeR", "afterNR_vs_afterR")
+renamed_data_list <- mapply(rename_columns, data=data, suffix=suffixes, SIMPLIFY=FALSE)
+
+# create an empty list to store all sublists
+new_list <- list()
+
+# double loop, adding each sublist to new_list
+for (i in 1:4) {
+  for (j in 1:8) {
+    new_list[[length(new_list) + 1]] <- renamed_data_list[[i]][[j]]
+  }
+}
+
+# Merge all data frames
+all_comparisons_alternative_integrin <- Reduce(function(x, y) merge(x, y, by = "celltype", all=TRUE), new_list)
+
+# Remove all NA columns 
+all_comparisons_alternative_integrin <- all_comparisons_alternative_integrin[, colSums(is.na(all_comparisons_alternative_integrin)) != nrow(all_comparisons_alternative_integrin)]
+
+# Create a vector of indices for the elements to be updated
+idx <- seq(from = 3, to = 59, by = 2)
+
+# Create a vector of values to assign to the specified indices
+vals <- c("ITGA1", "ITGA1", "ITGAE", "ITGAL", "ITGAX", "ITGB1", "ITGB2", 
+          "ITGA1", "ITGAE", "ITGAL", "ITGAM", "ITGAX", "ITGB1", "ITGB2",
+          "before_ITGA1", "before_ITGA3", "before_ITGAE", "before_ITGAL", "before_ITGAM", "before_ITGAX", "before_ITGB1", "before_ITGB2", 
+          "after_ITGA1", "after_ITGAE", "after_ITGAL", "after_ITGAM", "after_ITGAX", "after_ITGB1", "after_ITGB2")
+
+# Use a loop to assign the values to change the column names
+for (i in seq_along(idx)) {
+  all_comparisons_alternative_integrin[idx[i]] <- vals[i]
+}
+
+# order the cell type levels
+all_comparisons_alternative_integrin$celltype <- fct_relevel(
+  all_comparisons_alternative_integrin$celltype,
+  "IgM", "IgG", "IgA", "Ig_negative", "GC", "Follicular", "Cycling B", 
+  "CD8+ LP", "CD8+ IL17+", "CD8+ IELs", "Tregs", "CD4+ Activated Fos-lo", 
+  "CD4+ Activated Fos-hi", "DC2", "NKs", "Inflammatory Monocytes"
+)
+
+# Create a new dataframe for afterR_vs_beforeR
+afterR_vs_beforeR_alternative_integrin <- rbind(
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterR_vs_beforeR_A1", "integrin_afterR_vs_beforeR_A1", c(-0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterR_vs_beforeR_A3", "integrin_afterR_vs_beforeR_A3", c(-0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterR_vs_beforeR_AE", "integrin_afterR_vs_beforeR_AE", c(-0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterR_vs_beforeR_AL", "integrin_afterR_vs_beforeR_AL", c(-0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterR_vs_beforeR_AX", "integrin_afterR_vs_beforeR_AX", c(-0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterR_vs_beforeR_B1", "integrin_afterR_vs_beforeR_B1", c(-0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterR_vs_beforeR_B2", "integrin_afterR_vs_beforeR_B2", c(-0.5, 0, 0.5, 1))
+)
+
+# Create a new dataframe for afterNR_vs_beforeNR
+afterNR_vs_beforeNR_alternative_integrin <- rbind(
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterNR_vs_beforeNR_A1", "integrin_afterNR_vs_beforeNR_A1", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterNR_vs_beforeNR_AE", "integrin_afterNR_vs_beforeNR_AE", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterNR_vs_beforeNR_AL", "integrin_afterNR_vs_beforeNR_AL", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterNR_vs_beforeNR_AM", "integrin_afterNR_vs_beforeNR_AM", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterNR_vs_beforeNR_AX", "integrin_afterNR_vs_beforeNR_AX", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterNR_vs_beforeNR_B1", "integrin_afterNR_vs_beforeNR_B1", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterNR_vs_beforeNR_B2", "integrin_afterNR_vs_beforeNR_B2", c(-1, -0.5, 0, 0.5, 1))
+)
+
+# Create a new dataframe for beforeNR_vs_beforeR
+beforeNR_vs_beforeR_alternative_integrin <- rbind(
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_beforeNR_vs_beforeR_A1", "integrin_beforeNR_vs_beforeR_A1", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_beforeNR_vs_beforeR_A3", "integrin_beforeNR_vs_beforeR_A3", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_beforeNR_vs_beforeR_AE", "integrin_beforeNR_vs_beforeR_AE", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_beforeNR_vs_beforeR_AL", "integrin_beforeNR_vs_beforeR_AL", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_beforeNR_vs_beforeR_AM", "integrin_beforeNR_vs_beforeR_AM", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_beforeNR_vs_beforeR_AX", "integrin_beforeNR_vs_beforeR_AX", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_beforeNR_vs_beforeR_B1", "integrin_beforeNR_vs_beforeR_B1", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_beforeNR_vs_beforeR_B2", "integrin_beforeNR_vs_beforeR_B2", c(-1, -0.5, 0, 0.5, 1))
+)
+
+# Create a new dataframe for afterNR_vs_afterR
+afterNR_vs_afterR_alternative_integrin <- rbind(
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterNR_vs_afterR_A1", "integrin_afterNR_vs_afterR_A1", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterNR_vs_afterR_AE", "integrin_afterNR_vs_afterR_AE", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterNR_vs_afterR_AL", "integrin_afterNR_vs_afterR_AL", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterNR_vs_afterR_AM", "integrin_afterNR_vs_afterR_AM", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterNR_vs_afterR_AX", "integrin_afterNR_vs_afterR_AX", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterNR_vs_afterR_B1", "integrin_afterNR_vs_afterR_B1", c(-1, -0.5, 0, 0.5, 1)),
+  create_grouped_data(all_comparisons_alternative_integrin, "avg_log2FC_afterNR_vs_afterR_B2", "integrin_afterNR_vs_afterR_B2", c(-1, -0.5, 0, 0.5, 1))
+)
+
+# merge beforeNR_vs_beforeR_alternative_integrin and afterNR_vs_afterR_alternative_integrin
+NR_vs_R_alternative_integrin <- rbind(beforeNR_vs_beforeR_alternative_integrin, afterNR_vs_afterR_alternative_integrin)
+NR_vs_R_alternative_integrin$integrin <- factor(
+  NR_vs_R_alternative_integrin$integrin,
+  levels = c(
+    "before_ITGA1","after_ITGA1",
+    "before_ITGA3",
+    "before_ITGAE", "after_ITGAE",
+    "before_ITGAL", "after_ITGAL",
+    "before_ITGAM", "after_ITGAM",
+    "before_ITGAX", "after_ITGAX", 
+    "before_ITGB1", "after_ITGB1", 
+    "before_ITGB2", "after_ITGB2"))
+# plot heatmap
+colors1 <- c(
+  "#f0c9c9", # (-0.5,0]
+  
+  "#C6DBEF", # (0,0.5]
+  "#6BAED6" # (0.5,1]
+)
+
+p1 <- heatmap_1(afterR_vs_beforeR_alternative_integrin, colors1)
+
+colors2 <- c(
+  "#f27777", # (-1,-0.5]
+  "#f0c9c9", # (-0.5,0]
+  
+  "#C6DBEF", # (0,0.5]
+  "#6BAED6" # (0.5,1]
+)
+
+p2 <- heatmap_2(afterNR_vs_beforeNR_alternative_integrin, colors2)
+
+colors3 <- c(
+  "#b58f5c", # (-1,-0.5]
+  "#dbc7ab", # (-0.5,0]
+  
+  "#dcf7f5", # (0,0.5]
+  "#86e3dc" # (0.5,1]
+)
+
+p3 <- heatmap_2(NR_vs_R_alternative_integrin, colors3)
+
+p_out <- p1 + p2 + p3 + plot_layout(guides = "collect")
+ggsave("vedo2_scRNA_biopsies_alternative_integrin_heatmapi.pdf",  plot = p_out, width=10, height=10, path = output_loc)
+
+```
+

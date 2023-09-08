@@ -1,0 +1,254 @@
+---
+title: "vedo2_check_integrins_de"
+author: "Roy Oelen"
+date: "2022-09-26"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r header, include=FALSE}
+############################################################################################################################
+# Authors: Roy Oelen
+# Name: vedo2_check_integrins_de.Rmd
+# Function: check the integrin expression changes in vedo2
+############################################################################################################################
+```
+
+```{r libraries, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+####################
+# libraries        #
+####################
+library(Seurat)
+library(ggplot2)
+```
+
+```{r functions, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+####################
+# Functions        #
+####################
+
+# perform MAST as implemented in Seurat
+perform_seurat_mast <- function(seurat_object, identity_column, ident.1, ident.2, min.pct=0.1, assay='SCT', slot='data', features=NULL, logfc_threshold=0.25){
+  # set the identity for the Seurat object
+  Idents(seurat_object) <- identity_column
+  # set the assay
+  DefaultAssay(seurat_object) <- assay
+  # perform MAST
+  mast_result <- FindMarkers(seurat_object, ident.1 = ident.1, ident.2 = ident.2, test.use = 'MAST', min.pct = min.pct, slot = slot, features = features, logfc.threshold = logfc_threshold)
+  return(mast_result)
+}
+
+# perform MAST as implemented in Seurat, for each cell type
+perform_seurat_mast_per_celltype <- function(seurat_object, identity_column, ident.1, ident.2, mast_output_loc, cell_type_column='cell_type_final', cell_types_to_consider=NULL, min.pct=0.1, assay='SCT', slot='data', features=NULL, logfc_threshold=0.25){
+  # check if the mast output loc exists
+  if(!dir.exists(mast_output_loc)){
+    # create the directory if not
+    dir.create(mast_output_loc, recursive = T)
+  }
+  # check the overlapping cell types
+  cell_types <- unique(seurat_object@meta.data[[cell_type_column]])
+  if(!is.null(cell_types_to_consider)){
+    cell_types <- intersect(cell_types, cell_types_to_consider)
+  }
+  # check each cell type
+  for(cell_type in cell_types){
+    # get a safe file name
+    cell_type_safe <- gsub(' |/', '_', cell_type)
+    cell_type_safe <- gsub('-', '_negative', cell_type_safe)
+    cell_type_safe <- gsub('\\+', '_positive', cell_type_safe)
+    cell_type_safe <- gsub('\\)', '', cell_type_safe)
+    cell_type_safe <- gsub('\\(', '', cell_type_safe)
+    # paste together the output location
+    #full_output_loc <- paste(mast_output_loc, cell_type_safe, '_', ident.1, '_vs_', ident.2, '.tsv', sep = '')
+    full_output_loc <- paste(mast_output_loc, cell_type_safe, '.tsv', sep = '')
+    # subset to the cell type
+    seurat_object_celltype <- seurat_object[, seurat_object@meta.data[[cell_type_column]] == cell_type]
+    # try to do the differential expression (might fail if too few cells)
+    tryCatch(
+      {
+        # perform the analysis
+        mast_result <- perform_seurat_mast(seurat_object_celltype, identity_column, ident.1, ident.2, min.pct, assay, slot = slot, features = features, logfc_threshold = logfc_threshold)
+        # add our only mtc if features were selected. Seurat does Bonferroni correction by multiplying the nominal P-value by the number of genes. when we select the genes to test, this is incorrect.
+        if (!is.null(features) & length(features) > 0) {
+          mast_result[['bonferroni']] <- p.adjust(mast_result[['p_val']], method = 'bonferroni')
+          mast_result[['BH']] <- p.adjust(mast_result[['p_val']], method = 'BH')
+        }
+        # write the result
+        write.table(mast_result, full_output_loc, sep = '\t', row.names = T, col.names = T)
+      },
+      error=function(cond) {
+        # print why we fail
+        print(paste('DE failed for', cell_type, ident.1, 'vs', ident.2, ':', cond))
+      }
+    )
+  }
+}
+
+# create the table which will have the log fold changes (and p values) of the MAST output of the selected genes
+create_lfc_table <- function(mast_output_loc, features){
+  # list all the files
+  files_in_dir <- list.files(mast_output_loc, pattern = '*.tsv')
+  # initialize the full table
+  lfc_table <- NULL
+  # check each file
+  for (output_file in files_in_dir) {
+    # read the output file
+    mast_file <- read.table(paste(mast_output_loc, output_file, sep = ''), sep = '\t', header = T, row.names = 1)
+    # add the genes as a column
+    mast_file[['gene']] <- rownames(mast_file)
+    # extract the cell type from the filename
+    celltype <- gsub('.tsv', '', output_file)
+    # add the celltype as a column
+    mast_file[['celltype']] <- celltype
+    # get the genes that we want, and that we have
+    common_genes <- intersect(features, rownames(mast_file))
+    # subset to only the genes that we are interested in
+    mast_file <- mast_file[common_genes, ]
+    # remove the rownames, as those won't be unique when pasting the cell type together
+    rownames(mast_file) <- NULL
+    # add to the big table
+    if (is.null(lfc_table)) {
+      lfc_table <- mast_file
+    }
+    else{
+      lfc_table <- rbind(lfc_table, mast_file)
+    }
+  }
+  return(lfc_table)
+}
+
+
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+####################
+# Main Code        #
+####################
+
+# set the location of the object
+vedo2_pbmc_loc <- '/groups/umcg-weersma/tmp01/projects/vedopredict2/pbmc/ongoing/cell_type_classification/objects/vedo2_pbmc_merged_clustered_azi.rds'
+
+# read the object
+vedo2_pbmc <- readRDS(vedo2_pbmc_loc)
+
+# add the bulk column
+vedo2_pbmc@meta.data[['bulk']] <- 'bulk'
+
+# the integrins to check for DE
+integrins <- c(
+'ITGB1',
+'ITGB2',
+'ITGAM',
+'ITGA1',
+'ITGA3',
+'ITGA4',
+'ITGB7',
+'ITGAE',
+'ITGAL',
+'ITGAX',
+'PECAM1',
+'CDH1',
+'FN1',
+'VCAM1',
+'ICAM1',
+'MADCAM1'
+)
+
+# set the output for MAST
+integrin_output_loc <- '/groups/umcg-weersma/tmp01/projects/vedopredict2/pbmc/ongoing/integrins_expression/differential_expression/seurat_MAST/SCT/'
+```
+
+```{r late_resp_nonresp_setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# T4/T5 response vs non-response
+integrin_output_late_resp_vs_nonresp <- paste(integrin_output_loc, 'late_resp_vs_nonresp/', sep = '')
+# create the directory
+dir.create(integrin_output_late_resp_vs_nonresp, recursive = T)
+
+# get the T4/T5 responders vs non-responders
+vedo2_pbmc_late <- vedo2_pbmc[, vedo2_pbmc@meta.data[['timepoint']] %in% c('T4', 'T5')]
+
+# perform differential expression at the bulk level
+perform_seurat_mast_per_celltype(vedo2_pbmc_late, identity_column = 'clinical_response', cell_type_column = 'bulk',  mast_output_loc = integrin_output_late_resp_vs_nonresp, ident.1 = 'yes', ident.2 = 'no', features = integrins, min.pct = 0, logfc_threshold = 0)
+# now for each cell type
+perform_seurat_mast_per_celltype(vedo2_pbmc_late, identity_column = 'clinical_response', cell_type_column = 'azimuth_l2',  mast_output_loc = integrin_output_late_resp_vs_nonresp, ident.1 = 'yes', ident.2 = 'no', features = integrins, min.pct = 0, logfc_threshold = 0)
+
+
+# create the dotplots
+dp_vedo2_pbmc_late_resp <- DotPlot(vedo2_pbmc_late[, vedo2_pbmc_late@meta.data[['clinical_response']] == 'yes'], features = integrins, assay = 'RNA', group.by = 'azimuth_l2') +
+  ggtitle('vedo2 PBMC T4/T5 responders expression') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+dp_vedo2_pbmc_late_nonresp <- DotPlot(vedo2_pbmc_late[, vedo2_pbmc_late@meta.data[['clinical_response']] == 'no'], features = integrins, assay = 'RNA', group.by = 'azimuth_l2') +
+  ggtitle('vedo2 PBMC T4/T5 nonresponders expression') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+# get the lfc table
+integrin_lfc_late_resp_vs_nonresp <- create_lfc_table(integrin_output_late_resp_vs_nonresp, features = integrins)
+
+# create the heatmap
+hm_vedo2_pbmc_late_response_vs_nonresp <- ggplot(data = integrin_lfc_late_resp_vs_nonresp, mapping = aes(gene, celltype, fill = avg_log2FC)) +
+  geom_tile() +
+  scale_fill_gradient2(
+    low = 'red',
+    mid = 'white',
+    high = 'blue',
+    midpoint = 0,
+    space = 'Lab',
+    na.value = 'grey50',
+    guide = 'colourbar',
+    aesthetics = 'fill'
+  ) +
+  ggtitle('vedo2 PBMC T4/T5 responders vs non-responders LFC') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  theme(panel.border = element_rect(color="black", fill=NA, size=1.1), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), strip.background = element_rect(colour="white", fill="white"))
+
+
+# add the -log10 of the P value, this can be used to have bigger dots for more significant changes
+integrin_lfc_late_resp_vs_nonresp[['neg_log10_p']] <- -log10(integrin_lfc_late_resp_vs_nonresp[['bonferroni']])
+
+# one could argue that testing across the cell types should mean you should correct for all of them together, add that for completeness sake
+integrin_lfc_late_resp_vs_nonresp[['bonferroni_all']] <- p.adjust(integrin_lfc_late_resp_vs_nonresp[['p_val']], method = 'bonferroni')
+integrin_lfc_late_resp_vs_nonresp[['BH_all']] <- p.adjust(integrin_lfc_late_resp_vs_nonresp[['p_val']], method = 'BH')
+# should we choose this one for visualization, the -log10 paints a clearer picture
+integrin_lfc_late_resp_vs_nonresp[['bonferroni_all_neg_log10_p']] <- -log10(integrin_lfc_late_resp_vs_nonresp[['bonferroni_all']])
+integrin_lfc_late_resp_vs_nonresp[['BH_all_neg_log10_p']] <- -log10(integrin_lfc_late_resp_vs_nonresp[['BH_all']])
+
+
+# and a points map where we show the P value in addition to the LFC
+dp_vedo2_pbmc_late_response_vs_nonresp <- ggplot(data = integrin_lfc_late_resp_vs_nonresp, mapping = aes(gene, celltype, color = avg_log2FC, size = neg_log10_p)) +
+  geom_point() +
+  scale_colour_gradient2(
+    low = 'red',
+    mid = 'white',
+    high = 'blue',
+    midpoint = 0,
+  space = 'Lab',
+  na.value = 'grey50',
+  guide = 'colourbar',
+  aesthetics = 'colour'
+  ) +
+  ggtitle('vedo2 PBMC T4/T5 responders vs non-responders LFC and -log10 P') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  theme(panel.border = element_rect(color="black", fill=NA, size=1.1), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), strip.background = element_rect(colour="white", fill="white"))
+```
+
+
+## T4/T5 responders versus non-responders
+```{r, include = TRUE, fig.width=10, fig.height=7}
+dp_vedo2_pbmc_late_resp
+```
+```{r, include = TRUE, fig.width=10, fig.height=7}
+dp_vedo2_pbmc_late_nonresp
+```
+```{r, include = TRUE, fig.width=10, fig.height=7}
+hm_vedo2_pbmc_late_response_vs_nonresp
+```
+```{r, include = TRUE, fig.width=10, fig.height=7}
+dp_vedo2_pbmc_late_response_vs_nonresp
+```

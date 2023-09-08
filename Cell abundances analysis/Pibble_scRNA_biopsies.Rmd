@@ -1,0 +1,813 @@
+---
+title: "Pibble analysis in colonic 3 compartments scRNA-seq data "
+Note: Run the R script in gearshift cluster
+author: "Shiqiang Sun"
+output: html_document
+date: "2023-03-10"
+---
+
+```{r header, include=FALSE}
+#######################################################################################
+# R Script
+# Title: Pibble analysis in colonic 3 compartments scRNA-seq data 
+# Date: 12-09-2022
+# Run the R script in gearshift cluster
+#######################################################################################
+```
+
+```{r library, include=FALSE}
+####################
+# libraries
+####################
+library(fido)
+library(ggplot2)
+library(dplyr)
+library(phyloseq)
+library(tidyverse)
+library(stringi)
+library(openxlsx)
+library(Seurat)
+```
+
+```{r functions, include=FALSE}
+####################
+# functions
+####################
+# Define function to create cell counts
+Create_cell_counts <- function(data) {
+  tryCatch(
+    {
+      # extract cell counts to matrix
+      counts <- as.data.frame.matrix(table(data$Final_HTO, data$cell_type_final))
+      
+      # add patient information
+      counts$patient <- sapply(strsplit(rownames(counts), "-"), `[`, 1)
+      
+      # add timepoint information
+      counts$timepoint <- sapply(strsplit(rownames(counts), "-"), `[`, 2)
+      
+      # add location information
+      counts$location <- sapply(strsplit(rownames(counts), "-"), `[`, 3)
+      
+      # add inflammation information
+      counts$inflammation <- sapply(strsplit(rownames(counts), "-"), `[`, 4)
+      
+      # create a lookup table for PGA response
+      PGA_response <- c("V001"="yes", "V002"="yes", "V050" = "no", "V004"="yes", 
+                        "V005"="yes", "V006"="no", "V007"="yes", "V008"="yes",
+                        "V010"="no", "V011"="yes", "V013"="yes", "V014"="yes", 
+                        "V016"="no", "V018"="no", "V019"="no", "V020"="yes", 
+                        "V022"="yes", "V023"="yes", "V024"="yes", "V031"="no", 
+                        "V032"="no", "V033"="yes", "V035"="yes", "V037"="no", "V039"="no")
+      
+      # use lookup table to update PGA response
+      counts$PGA_response <- PGA_response[counts$patient]
+      
+      # create a lookup table for anti-TNF status
+      tnf_status <- c("V001"="naive", "V002"="naive", "V050" = "anti_TNF", "V004"="naive", 
+                      "V005"="anti_TNF", "V006"="anti_TNF", "V007"="anti_TNF", "V008"="anti_TNF",
+                      "V010"="anti_TNF", "V011"="naive", "V013"="anti_TNF", "V014"="anti_TNF", 
+                      "V016"="anti_TNF", "V018"="anti_TNF", "V019"="anti_TNF", "V020"="naive", 
+                      "V022"="anti_TNF", "V023"="naive", "V024"="anti_TNF", "V031"="anti_TNF", 
+                      "V032"="anti_TNF", "V033"="naive", "V035"="naive", "V037"="naive", "V039"="anti_TNF")
+      
+      # use lookup table to update TNF status
+      counts$TNF_status <- tnf_status[counts$patient]
+      
+      return(counts)
+    },
+    error=function(error_condition){
+      print(paste('cound not do analysis', ':', error_condition))
+    })
+}
+
+
+# Define function to fit pibble model 1 (non-responders vs responders at both pre-VDZ and post-VDZ)
+pibblefit_model_1 <- function(counts, timepoint_level, response_level, inflammation_level, location_level, TNF_level, correction) {
+  tryCatch(
+    {
+      # Filter counts by timepoint
+      counts <- filter(counts, timepoint == timepoint_level)
+      
+      if (correction == 'without_correction') {
+        
+        # Remove some columns
+        counts <- counts %>% select(-c("patient", "location", "inflammation", "TNF_status", "timepoint"))
+        
+        # Relevel response variable
+        counts <- mutate(counts, PGA_response=relevel(factor(PGA_response), ref=response_level))
+        counts2 <- counts %>% select(-PGA_response)
+        
+        # Transpose counts2
+        Y <- t(counts2)
+        
+        # Create design matrix
+        X <- t(model.matrix(~PGA_response, data=counts))
+      }
+      else if(correction == 'inflammation') {
+        
+        # Remove patient, location, and TNF_status columns
+        counts <- counts %>% select(-c("patient", "location", "TNF_status"))
+        
+        # Relevel response variable
+        counts <- mutate(counts, PGA_response=relevel(factor(PGA_response), ref=response_level),
+                         inflammation=relevel(factor(inflammation), ref=inflammation_level))
+        
+        # Select response and inflammation information
+        meatadata_timepoint <- counts %>% select(PGA_response, inflammation)
+        
+        # Create design matrix
+        f <- reformulate(termlabels=c("PGA_response", "inflammation"))
+        X <- t(model.matrix(f, data=meatadata_timepoint))
+        
+        # Remove timepoint, inflammation, and PGA_response column
+        counts <- counts %>% select(-timepoint, -inflammation, -PGA_response)
+        
+        # Transpose counts
+        Y <- t(counts)
+      }
+      
+      else if(correction == 'location') {
+        
+        # Remove patient, location, inflammation, and TNF_status columns
+        counts <- counts %>% select(-c("patient", "inflammation", "TNF_status"))
+        
+        # add new location information
+        counts$location2 <- ifelse(counts$location == "sigmoid", "sigmoid", "no_sigmoid")
+        
+        # Relevel response variable and location variabvle
+        counts <- mutate(counts, PGA_response=relevel(factor(PGA_response), ref=response_level),
+                         location2=relevel(factor(location2), ref=location_level))
+        
+        # Select response and location2 information
+        meatadata_timepoint <- counts %>% select(PGA_response, location2)
+        
+        # Create design matrix
+        f <- reformulate(termlabels=c("PGA_response", "location2"))
+        X <- t(model.matrix(f, data=meatadata_timepoint))
+        
+        # Remove timepoint, location2, and PGA_response column
+        counts <- counts %>% select(-timepoint, -location, -location2, -PGA_response)
+        
+        # Transpose counts
+        Y <- t(counts)
+      }
+      
+      else if(correction == 'inflammation_location') {
+        
+        # Remove patient and TNF_status columns
+        counts <- counts %>% select(-c("patient", "TNF_status"))
+        
+        # add new location information
+        counts$location2 <- ifelse(counts$location == "sigmoid", "sigmoid", "no_sigmoid")
+        
+        
+        # Relevel response variable and location variabvle
+        counts <- mutate(counts, PGA_response=relevel(factor(PGA_response), ref=response_level),
+                         inflammation=relevel(factor(inflammation), ref=inflammation_level),
+                         location2=relevel(factor(location2), ref=location_level))
+        
+        # Select response and location2 information
+        meatadata_timepoint <- counts %>% select(PGA_response, inflammation, location2)
+        
+        # Create design matrix
+        f <- reformulate(termlabels=c("PGA_response", "inflammation", "location2"))
+        X <- t(model.matrix(f, data=meatadata_timepoint))
+        
+        # Remove timepoint, location2, and PGA_response column
+        counts <- counts %>% select(-timepoint, -inflammation, -location, -location2, -PGA_response)
+        
+        # Transpose counts
+        Y <- t(counts)
+      }
+      
+      else if(correction == 'anti_TNF') {
+        
+        # Remove patient, location, and inflammation columns
+        counts <- counts %>% select(-c("patient", "location", "inflammation"))
+        
+        # Relevel response variable
+        counts <- mutate(counts, PGA_response=relevel(factor(PGA_response), ref=response_level),
+                         TNF_status=relevel(factor(TNF_status), ref=TNF_level))
+        
+        # Select response and TNF_status information
+        meatadata_timepoint <- counts %>% select(PGA_response, TNF_status)
+        
+        # Create design matrix
+        f <- reformulate(termlabels=c("PGA_response", "TNF_status"))
+        X <- t(model.matrix(f, data=meatadata_timepoint))
+        
+        # Remove timepoint, TNF_status, and PGA_response column
+        counts <- counts %>% select(-timepoint, -TNF_status, -PGA_response)
+        
+        # Transpose counts
+        Y <- t(counts)
+      }
+      
+      # Define priors
+      upsilon <- nrow(Y)+3
+      theta <- matrix(0, nrow(Y)-1, nrow(X))
+      gamma <- diag(nrow(X))
+      G <- cbind(diag(nrow(Y)-1), -1)
+      Xi <- (upsilon-nrow(Y))*G%*%diag(nrow(Y))%*%t(G)
+      priors <- pibble(Y, X, upsilon, theta, gamma, Xi)
+      
+      # Fit pibble model
+      priors$Y <- Y
+      priors$names_samples <- colnames(Y)
+      priors$names_categories <- rownames(Y)
+      priors$names_covariates <- rownames(X)
+      posterior <- refit(priors, optim_method="lbfgs", seed=1234) 
+      posterior <- to_clr(posterior)
+      dimnames(posterior$Lambda)[[1]] <- rownames(Y)
+      
+      # Assign posterior to a global variable
+      assign("posterior", posterior, envir = .GlobalEnv)
+      
+      return(posterior)
+    },
+    error=function(error_condition){
+      print(paste('cound not do analysis', ':', error_condition))
+    }) 
+  
+}
+
+
+# Define function to fit pibble model 2 (R over treatment and NR over treatment)
+pibblefit_model_2 <- function(counts, response_level, timepoint_level, inflammation_level, location_level, TNF_level, correction) {
+  tryCatch(
+    {
+      # Filter counts by response
+      counts <- filter(counts, PGA_response == response_level)
+      if (correction == 'without_correction') {
+        
+        # Remove some columns
+        counts <- counts %>% select(-c("patient", "location", "inflammation", "TNF_status", "PGA_response"))
+        
+        # Relevel timepoint variable
+        counts <- mutate(counts, timepoint=relevel(factor(timepoint), ref=timepoint_level))
+        counts2 <- counts %>% select(-timepoint)
+        
+        # Transpose data
+        Y <- t(counts2)
+        
+        # Create design matrix
+        X <- t(model.matrix(~timepoint, data=counts))
+      }
+      
+      else if(correction == 'inflammation') {
+        
+        # Remove patient, location, and TNF_status columns
+        counts <- counts %>% select(-c("patient", "location", "TNF_status"))
+        
+        # Relevel response variable
+        counts <- mutate(counts, timepoint=relevel(factor(timepoint), ref=timepoint_level),
+                         inflammation=relevel(factor(inflammation), ref=inflammation_level))
+        
+        # Select timepoint and inflammation information
+        meatadata_response <- counts %>% select(timepoint, inflammation)
+        
+        # Create design matrix
+        f <- reformulate(termlabels=c("timepoint", "inflammation"))
+        X <- t(model.matrix(f, data=meatadata_response))
+        
+        # Remove timepoint, inflammation, and PGA_response column
+        counts <- counts %>% select(-timepoint, -inflammation, -PGA_response)
+        
+        # Transpose counts
+        Y <- t(counts)
+      }
+      
+      else if(correction == 'location') {
+        
+        # Remove patient, location, inflammation, and TNF_status columns
+        counts <- counts %>% select(-c("patient", "inflammation", "TNF_status"))
+        
+        # add new location information
+        counts$location2 <- ifelse(counts$location == "sigmoid", "sigmoid", "no_sigmoid")
+        
+        # Relevel timepoint variable and location variabvle
+        counts <- mutate(counts, timepoint=relevel(factor(timepoint), ref=timepoint_level),
+                         location2=relevel(factor(location2), ref=location_level))
+        
+        # Select timepoint and location2 information
+        meatadata_response <- counts %>% select(timepoint, location2)
+        
+        # Create design matrix
+        f <- reformulate(termlabels=c("timepoint", "location2"))
+        X <- t(model.matrix(f, data=meatadata_response))
+        
+        # Remove timepoint, location2, and PGA_response column
+        counts <- counts %>% select(-timepoint, -location, -location2, -PGA_response)
+        
+        # Transpose counts
+        Y <- t(counts)
+        
+      }
+      
+      else if(correction == 'inflammation_location') {
+        
+        # Remove patient and TNF_status columns
+        counts <- counts %>% select(-c("patient", "TNF_status"))
+        
+        # add new location information
+        counts$location2 <- ifelse(counts$location == "sigmoid", "sigmoid", "no_sigmoid")
+        
+        # Relevel timepoint variable and location variabvle
+        counts <- mutate(counts, timepoint=relevel(factor(timepoint), ref=timepoint_level),
+                         inflammation=relevel(factor(inflammation), ref=inflammation_level),
+                         location2=relevel(factor(location2), ref=location_level))
+        
+        # Select timepoint and location2 information
+        meatadata_response <- counts %>% select(timepoint, inflammation, location2)
+        
+        # Create design matrix
+        f <- reformulate(termlabels=c("timepoint", "inflammation", "location2"))
+        X <- t(model.matrix(f, data=meatadata_response))
+        
+        # Remove timepoint, location2, and PGA_response column
+        counts <- counts %>% select(-timepoint, -inflammation, -location, -location2, -PGA_response)
+        
+        # Transpose counts
+        Y <- t(counts)
+        
+      }
+      
+      else if(correction == 'anti_TNF') {
+        
+        # Remove patient, location, and inflammation columns
+        counts <- counts %>% select(-c("patient", "location", "inflammation"))
+        
+        # Relevel response variable
+        counts <- mutate(counts, timepoint=relevel(factor(timepoint), ref=timepoint_level),
+                         TNF_status=relevel(factor(TNF_status), ref=TNF_level))
+        
+        # Select timepoint and TNF_status information
+        meatadata_response <- counts %>% select(timepoint, TNF_status)
+        
+        # Create design matrix
+        f <- reformulate(termlabels=c("timepoint", "TNF_status"))
+        X <- t(model.matrix(f, data=meatadata_response))
+        
+        # Remove timepoint, TNF_status, and PGA_response column
+        counts <- counts %>% select(-timepoint, -TNF_status, -PGA_response)
+        
+        # Transpose counts
+        Y <- t(counts)
+      }
+      
+      # Define priors
+      upsilon <- nrow(Y)+3
+      theta <- matrix(0, nrow(Y)-1, nrow(X))
+      gamma <- diag(nrow(X))
+      G <- cbind(diag(nrow(Y)-1), -1)
+      Xi <- (upsilon-nrow(Y))*G%*%diag(nrow(Y))%*%t(G)
+      priors <- pibble(Y, X, upsilon, theta, gamma, Xi)
+      
+      # Fit pibble model
+      priors$Y <- Y
+      priors$names_samples <- colnames(Y)
+      priors$names_categories <- rownames(Y)
+      priors$names_covariates <- rownames(X)
+      posterior <- refit(priors, optim_method="lbfgs", seed=1234) 
+      posterior <- to_clr(posterior)
+      dimnames(posterior$Lambda)[[1]] <- rownames(Y)
+      
+      # Assign posterior to a global variable
+      assign("posterior", posterior, envir = .GlobalEnv)
+      
+      return(posterior)
+    }, 
+    error=function(error_condition){
+      print(paste('cound not do analysis', ':', error_condition))
+    })
+  
+}
+
+# Define function to plot pibble model
+plot_pibble <- function(focus_var=focus_var, pibble_fit=pibble_fit, output_taxa=T, siglevel=siglevel) {
+  
+  if(output_taxa==T) {
+    
+    sig_decreasing <- 
+      as.data.frame.table(pibble_fit$Lambda) %>%
+      filter(Var2==focus_var) %>%
+      mutate(idx=as.numeric(as.factor(Var1))) %>%
+      select(idx, Freq, x=Var2, y=Var1) %>%
+      group_by(idx) %>%
+      ggdist::median_qi(Freq, .width = c(0.5, 0.75, 0.90, 0.95, 0.97)) %>%
+      mutate(species=rep(rownames(pibble_fit$Y),5),
+             .width=factor(.width)) %>%
+      arrange(species) %>%
+      mutate(species=reorder(factor(species),Freq)) %>% 
+      pivot_wider(species, names_from=.width, values_from=.upper) %>%
+      select(species, p50=`0.5`, p75=`0.75`, p90=`0.9`, p95=`0.95`, p97=`0.97`) %>%
+      filter(!! rlang::sym(siglevel) < 0) %>%
+      mutate(species=factor(species)) %>% 
+      select(species) %>% 
+      pull() %>% 
+      levels()
+    
+    sig_increasing <- 
+      as.data.frame.table(pibble_fit$Lambda) %>%
+      filter(Var2==focus_var) %>%
+      mutate(idx=as.numeric(as.factor(Var1))) %>%
+      select(idx, Freq, x=Var2, y=Var1) %>%
+      group_by(idx) %>%
+      ggdist::median_qi(Freq, .width = c(0.5, 0.75, 0.90, 0.95, 0.97)) %>%
+      mutate(species=rep(rownames(pibble_fit$Y),5),
+             .width=factor(.width)) %>%
+      arrange(species) %>%
+      mutate(species=reorder(factor(species),Freq)) %>% 
+      pivot_wider(species, names_from=.width, values_from=.lower) %>%
+      select(species, p50=`0.5`, p75=`0.75`, p90=`0.9`, p95=`0.95`, p97=`0.97`) %>%
+      filter(!! rlang::sym(siglevel) > 0) %>%
+      mutate(species=factor(species)) %>% 
+      select(species) %>% 
+      pull() %>% 
+      levels() %>% 
+      rev()
+    
+    
+    sig_taxa <- list(sig_decreasing=sig_decreasing, sig_increasing=sig_increasing)
+    
+    return(sig_taxa)
+    
+  } else {
+    
+    sig_decreasing <- 
+      as.data.frame.table(pibble_fit$Lambda) %>%
+      filter(Var2==focus_var) %>%
+      mutate(idx=as.numeric(as.factor(Var1))) %>%
+      select(idx, Freq, x=Var2, y=Var1) %>%
+      group_by(idx) %>%
+      ggdist::median_qi(Freq, .width = c(0.5, 0.75, 0.90, 0.95, 0.97)) %>%
+      mutate(species=rep(rownames(pibble_fit$Y),5),
+             .width=factor(.width)) %>%
+      arrange(species) %>%
+      pivot_wider(species, names_from=.width, values_from=.upper) %>%
+      select(species, p50=`0.5`, p75=`0.75`, p90=`0.9`, p95=`0.95`, p97=`0.97`) %>%
+      filter(!! rlang::sym(siglevel) < 0) %>%
+      select(species) %>% 
+      pull()
+    
+    sig_increasing <- 
+      as.data.frame.table(pibble_fit$Lambda) %>%
+      filter(Var2==focus_var) %>%
+      mutate(idx=as.numeric(as.factor(Var1))) %>%
+      select(idx, Freq, x=Var2, y=Var1) %>%
+      group_by(idx) %>%
+      ggdist::median_qi(Freq, .width = c(0.5, 0.75, 0.90, 0.95, 0.97)) %>%
+      mutate(species=rep(rownames(pibble_fit$Y),5),
+             .width=factor(.width)) %>%
+      arrange(species) %>%
+      pivot_wider(species, names_from=.width, values_from=.lower) %>%
+      select(species, p50=`0.5`, p75=`0.75`, p90=`0.9`, p95=`0.95`, p97=`0.97`) %>%
+      filter(!! rlang::sym(siglevel) > 0) %>%
+      select(species) %>% 
+      pull()
+    
+    p <- as.data.frame.table(pibble_fit$Lambda) %>% 
+      filter(Var2==focus_var) %>% 
+      mutate(idx=as.numeric(as.factor(Var1))) %>% 
+      select(idx, Freq, x=Var2, y=Var1) %>% 
+      group_by(idx) %>%
+      ggdist::median_qi(Freq, .width=c(0.5, 0.75, 0.90, 0.95, 0.97)) %>%
+      mutate(species=rep(rownames(pibble_fit$Y),5)) %>% 
+      filter(species %in% c(sig_decreasing, sig_increasing)) %>%
+      ggplot(aes(y=reorder(factor(species),Freq), x=Freq, xmin=.lower, xmax=.upper)) +
+      ggdist::geom_interval(aes(alpha=.width), color="#297cd6") +
+      scale_alpha_continuous("Credible interval", range=c(.7, .15), breaks=c(0.5, 0.75, 0.90, 0.95, 0.97)) +
+      geom_point() +
+      #scale_color_brewer() +
+      theme(#legend.position="none",
+        legend.key=element_rect(fill='white'),
+        legend.text=element_text(size=10, color="black"),
+        strip.background=element_blank(),
+        strip.text=element_blank(),
+        panel.grid.major=element_blank(), 
+        panel.grid.minor=element_blank(), 
+        panel.background=element_rect(fill="white"),
+        panel.border=element_rect(colour="black", fill=NA, size=1),
+        axis.ticks.length=unit(0.25,"cm"), 
+        axis.text.x=element_text(size=10, color="black"),
+        axis.text.y=element_text(size=10, color="black")) +
+      labs(x="Log-Ratio Value", y=NULL, title=focus_var) +
+      geom_vline(xintercept=0, linetype="dashed", color="darkgray")
+    
+    return(p)    
+  }
+}
+
+# Define function to run Pibble analysis, generate plots for different credible intervals, and save them (Specific for pibblefit_model_1)
+run_pibble_and_plot_1 <- function(counts, response_level, timepoint_level, inflammation_level, location_level, TNF_level, correction, focus_var, condition, credible_intervals, output_path) {
+  # Run Pibble analysis
+  posterior <- pibblefit_model_1(counts = counts, timepoint_level = timepoint_level, response_level = response_level,  
+                                 inflammation_level = inflammation_level, location_level = location_level, 
+                                 TNF_level = TNF_level, correction = correction)
+  
+  # Generate plots for different credible intervals and save them
+  for(ci in credible_intervals){
+    plot_pibble(focus_var=focus_var, pibble_fit=posterior, output_taxa=F, siglevel=paste0("p",ci))
+    ggsave(paste0(output_path, condition, "_",ci,"CI.pdf"), width = 8, height = 6)
+  }
+}
+
+# Define function to run Pibble analysis, generate plots for different credible intervals, and save them (Specific for pibblefit_model_2)
+run_pibble_and_plot_2 <- function(counts, response_level, timepoint_level, inflammation_level, location_level, TNF_level, correction, focus_var, condition, credible_intervals, output_path) {
+  # Run Pibble analysis
+  posterior <- pibblefit_model_2(counts = counts, timepoint_level = timepoint_level, response_level = response_level,  
+                                 inflammation_level = inflammation_level, location_level = location_level, 
+                                 TNF_level = TNF_level, correction = correction)
+  
+  # Generate plots for different credible intervals and save them
+  for(ci in credible_intervals){
+    plot_pibble(focus_var=focus_var, pibble_fit=posterior, output_taxa=F, siglevel=paste0("p",ci))
+    ggsave(paste0(output_path, condition, "_",ci,"CI.pdf"), width = 8, height = 6)
+  }
+}
+
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+####################
+# main codes
+####################
+
+# Set seed
+set.seed(1234)
+
+# set the location of the vedo2_biopsy
+vedo2_scRNA_biopsy_loc <- '/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/cell_type_classification/objects/vedo2_102022_rsct.rds'
+
+# read the object
+vedo2_scRNA_biopsy <- readRDS(vedo2_scRNA_biopsy_loc)
+
+# Create cell counts
+vedo2_scRNA_biospy_counts <- Create_cell_counts(vedo2_scRNA_biopsy)
+
+#########################################################
+# Pibble without correction
+#########################################################
+
+# Set output directory
+output_dir <- "/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/compositional_analysis/Pibble_without_correction/"
+
+# Analyze 4 comparisons and generate plots
+# 1. before_nonresponders vs before_responders (before_responders as reference)
+run_pibble_and_plot_1(counts = vedo2_scRNA_biospy_counts, 
+                      timepoint_level = "T0", 
+                      response_level = "yes", 
+                      correction = "without_correction",
+                      focus_var = "PGA_responseno", 
+                      condition = "beforeNR_vs_beforeR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+# 2. after_nonresponders vs after_responders (after_responders as reference)
+run_pibble_and_plot_1(counts = vedo2_scRNA_biospy_counts, 
+                      timepoint_level = "T4",
+                      response_level = "yes", 
+                      correction = "without_correction",
+                      focus_var = "PGA_responseno", 
+                      condition = "afterNR_vs_afterR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+# 3. after_responders vs before_responders (before_responders as reference)
+run_pibble_and_plot_2(counts = vedo2_scRNA_biospy_counts, 
+                      response_level = "yes",
+                      timepoint_level = "T0",  
+                      correction = "without_correction",
+                      focus_var = "timepointT4", 
+                      condition = "afterR_vs_beforeR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+# 4. after_nonresponders vs before_nonresponders (before_nonresponders as reference)
+run_pibble_and_plot_2(counts = vedo2_scRNA_biospy_counts, 
+                      response_level = "no", 
+                      timepoint_level = "T0", 
+                      correction = "without_correction",
+                      focus_var = "timepointT4", 
+                      condition = "afterNR_vs_beforeNR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+
+#########################################################
+# Pibble correction for inflammation
+#########################################################
+
+# Set output directory
+output_dir <- "/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/compositional_analysis/Pibble_corretion_inflammation/"
+
+# Analyze 4 comparisons and generate plots
+# 1. before_nonresponders vs before_responders (before_responders as reference)
+run_pibble_and_plot_1(counts = vedo2_scRNA_biospy_counts, 
+                      timepoint_level = "T0", 
+                      response_level = "yes", 
+                      inflammation_level = "I", 
+                      correction = "inflammation",
+                      focus_var = "PGA_responseno", 
+                      condition = "beforeNR_vs_beforeR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+# 2. after_nonresponders vs after_responders (after_responders as reference)
+run_pibble_and_plot_1(counts = vedo2_scRNA_biospy_counts, 
+                      timepoint_level = "T4", 
+                      response_level = "yes", 
+                      inflammation_level = "I", 
+                      correction = "inflammation",
+                      focus_var = "PGA_responseno", 
+                      condition = "afterNR_vs_afterR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+# 3. after_responders vs before_responders (before_responders as reference)
+run_pibble_and_plot_2(counts = vedo2_scRNA_biospy_counts, 
+                      response_level = "yes", 
+                      timepoint_level = "T0", 
+                      inflammation_level = "I", 
+                      correction = "inflammation",
+                      focus_var = "timepointT4", 
+                      condition = "afterR_vs_beforeR", 
+                      credible_intervals = c(50, 75, 90, 95), output_path = output_dir)
+
+# 4. after_nonresponders vs before_nonresponders (before_nonresponders as reference)
+run_pibble_and_plot_2(counts = vedo2_scRNA_biospy_counts,
+                      response_level = "no", 
+                      timepoint_level = "T0",  
+                      inflammation_level = "I", 
+                      correction = "inflammation",
+                      focus_var = "timepointT4", 
+                      condition = "afterNR_vs_beforeNR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+
+#########################################################
+# Pibble correction for location
+#########################################################
+
+# Set output directory
+output_dir <- "/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/compositional_analysis/Pibble_corretion_location/"
+
+# Analyze 4 comparisons and generate plots
+# 1. before_nonresponders vs before_responders (before_responders as reference)
+run_pibble_and_plot_1(counts = vedo2_scRNA_biospy_counts,
+                      timepoint_level = "T0",
+                      response_level = "yes", 
+                      location_level = "sigmoid", 
+                      correction = "location",
+                      focus_var = "PGA_responseno", 
+                      condition = "beforeNR_vs_beforeR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+# 2. after_nonresponders vs after_responders (after_responders as reference)
+run_pibble_and_plot_1(counts = vedo2_scRNA_biospy_counts, 
+                      timepoint_level = "T4", 
+                      response_level = "yes", 
+                      location_level = "sigmoid",
+                      correction = "location",
+                      focus_var = "PGA_responseno",
+                      condition = "afterNR_vs_afterR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+# 3. after_responders vs before_responders (before_responders as reference)
+run_pibble_and_plot_2(counts = vedo2_scRNA_biospy_counts, 
+                      response_level = "yes",
+                      timepoint_level = "T0", 
+                      location_level = "sigmoid", 
+                      correction = "location",
+                      focus_var = "timepointT4", 
+                      condition = "afterR_vs_beforeR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+# 4. after_nonresponders vs before_nonresponders (before_nonresponders as reference)
+run_pibble_and_plot_2(counts = vedo2_scRNA_biospy_counts, 
+                      response_level = "no", 
+                      timepoint_level = "T0", 
+                      location_level = "sigmoid", 
+                      correction = "location",
+                      focus_var = "timepointT4", 
+                      condition = "afterNR_vs_beforeNR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+#########################################################
+# Pibble correction for both inflammation and location
+#########################################################
+
+# Set output directory
+output_dir <- "/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/compositional_analysis/Pibble_corretion_inflammation_location/"
+
+
+# Analyze 4 comparisons and generate plots
+# 1. before_nonresponders vs before_responders (before_responders as reference)
+run_pibble_and_plot_1(counts = vedo2_scRNA_biospy_counts, 
+                      timepoint_level = "T0", 
+                      response_level = "yes", 
+                      inflammation_level = "I", 
+                      location_level = "sigmoid", 
+                      correction = "inflammation_location",
+                      focus_var = "PGA_responseno", 
+                      condition = "beforeNR_vs_beforeR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+# 2. after_nonresponders vs after_responders (after_responders as reference)
+run_pibble_and_plot_1(counts = vedo2_scRNA_biospy_counts, 
+                      timepoint_level = "T4", 
+                      response_level = "yes", 
+                      inflammation_level = "I", 
+                      location_level = "sigmoid", 
+                      correction = "inflammation_location",
+                      focus_var = "PGA_responseno", 
+                      condition = "afterNR_vs_afterR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+# 3. after_responders vs before_responders (before_responders as reference)
+run_pibble_and_plot_2(counts = vedo2_scRNA_biospy_counts, 
+                      response_level = "yes",
+                      timepoint_level = "T0", 
+                      inflammation_level = "I", 
+                      location_level = "sigmoid", 
+                      correction = "inflammation_location",
+                      focus_var = "timepointT4",
+                      condition = "afterR_vs_beforeR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+# 4. after_nonresponders vs before_nonresponders (before_nonresponders as reference)
+run_pibble_and_plot_2(counts = vedo2_scRNA_biospy_counts, 
+                      response_level = "no", 
+                      timepoint_level = "T0", 
+                      inflammation_level = "I", 
+                      location_level = "sigmoid", 
+                      correction = "inflammation_location",
+                      focus_var = "timepointT4", 
+                      condition = "afterNR_vs_beforeNR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+#########################################################
+# Pibble correction for anti-TNF experience
+#########################################################
+
+
+# Set output directory
+output_dir <- "/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/compositional_analysis/Pibble_corretion_anti_TNF/"
+
+# Analyze 4 comparisons and generate plots
+# 1. before_nonresponders vs before_responders (before_responders as reference)
+run_pibble_and_plot_1(counts = vedo2_scRNA_biospy_counts, 
+                      timepoint_level = "T0", 
+                      response_level = "yes", 
+                      TNF_level = "naive", 
+                      correction = "anti_TNF",
+                      focus_var = "PGA_responseno", 
+                      condition = "beforeNR_vs_beforeR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+# 2. after_nonresponders vs after_responders (after_responders as reference)
+run_pibble_and_plot_1(counts = vedo2_scRNA_biospy_counts, 
+                      timepoint_level = "T4", 
+                      response_level = "yes", 
+                      TNF_level = "naive", 
+                      correction = "anti_TNF",
+                      focus_var = "PGA_responseno", 
+                      condition = "afterNR_vs_afterR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+# 3. after_responders vs before_responders (before_responders as reference)
+run_pibble_and_plot_2(counts = vedo2_scRNA_biospy_counts, 
+                      response_level = "yes", 
+                      timepoint_level = "T0", 
+                      TNF_level = "naive", 
+                      correction = "anti_TNF",
+                      focus_var = "timepointT4", 
+                      condition = "afterR_vs_beforeR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+# 4. after_nonresponders vs before_nonresponders (before_nonresponders as reference)
+run_pibble_and_plot_2(counts = vedo2_scRNA_biospy_counts, 
+                      response_level = "no", 
+                      timepoint_level = "T0",  
+                      TNF_level = "naive", 
+                      correction = "anti_TNF",
+                      focus_var = "timepointT4", 
+                      condition = "afterNR_vs_beforeNR", 
+                      credible_intervals = c(50, 75, 90, 95), 
+                      output_path = output_dir)
+
+```

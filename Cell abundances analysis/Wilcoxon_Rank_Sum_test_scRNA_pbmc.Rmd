@@ -1,0 +1,157 @@
+---
+title: "Wilcoxon rank sum test_scRNA pbmc"
+Note: Run the R script in gearshift cluster
+author: "Shiqiang Sun"
+output: html_document
+date: "2023-03-21"
+---
+
+```{r header, include=FALSE}
+##########################################################################################
+# Identifying statistically significant differences in cell proportions 
+# using Wilcoxon Rank Sum test in scRNA-seq pbmc data
+# Date: 09-Sep-2022
+# Author: Shiqiang Sun
+##########################################################################################
+```
+
+
+```{r library, include=FALSE}
+####################
+# libraries
+####################
+
+library(fido)
+library(ggplot2)
+library(dplyr)
+library(phyloseq)
+library(tidyverse)
+library(stringi)
+library(Seurat)
+```
+
+
+```{r functions, include=FALSE}
+#################
+# Functions
+#################
+
+# Define function to create cell counts
+Create_cell_counts <- function(data) {
+  
+  tryCatch(
+    {
+      # extract cell counts to matrix
+      counts <- as.data.frame.matrix(table(data$Final_HTO, data$azimuth_l2))
+      
+      # add patient information
+      counts$patient <- sapply(strsplit(rownames(counts), "-"), `[`, 1)
+      
+      # add timepoint information
+      counts$timepoint <- sapply(strsplit(rownames(counts), "-"), `[`, 2)
+      
+      # create a lookup table for PGA response
+      PGA_response <- c("V001"="yes", "V002"="yes", "V050" = "no", "V004"="yes", 
+                        "V005"="yes", "V006"="no", "V007"="yes", "V008"="yes",
+                        "V010"="no", "V011"="yes", "V013"="yes", "V014"="yes", 
+                        "V016"="no", "V018"="no", "V019"="no", "V020"="yes", 
+                        "V022"="yes", "V023"="yes", "V024"="yes", "V031"="no", 
+                        "V032"="no", "V033"="yes", "V035"="yes", "V037"="no",
+                        "V038"="yes", "V039"="no")
+      
+      # use lookup table to update PGA response
+      counts$PGA_response <- PGA_response[counts$patient]
+      
+      return(counts)
+    },
+    error=function(error_condition){
+      print(paste('cound not do analysis', ':', error_condition))
+    })
+}
+
+# Define function to run Wilcoxon Rank Sum test (non-responders vs responders at both pre-VDZ and post-VDZ)
+Wilcoxon_Rank_Sum_test_1 <- function(counts, timepoint_level, response) {
+  tryCatch(
+    {
+      # Filter counts by timepoint
+      counts <- filter(counts, timepoint == timepoint_level)
+      # Run Wilcoxon Rank Sum test
+      p_value <- sapply(counts[1:31], function(x) wilcox.test(x ~ counts[[response]], exact = FALSE, paired = F)$p.value)
+      # Change p_value as dataframe
+      p_value <- as.data.frame(p_value)
+      # select significant results
+      p_value_0.05 <- filter(p_value, p_value < 0.05)
+      # keep the correct order after saving data
+      p_value_0.05 <- cbind(rownames(p_value_0.05),p_value_0.05)
+      write.table(p_value_0.05, paste0(output_dir, timepoint_level, '_', response, '_significant.txt'), 
+                  quote = F, row.names = F, col.names = T, sep = '\t')
+    },
+    error=function(error_condition){
+      print(paste('cound not do analysis', ':', error_condition))
+    })
+}
+
+# Define function to run Wilcoxon Rank Sum test (R over treatment and NR over treatment)
+Wilcoxon_Rank_Sum_test_2 <- function(counts, response_level, timepoint) {
+  tryCatch(
+    {
+      # Filter counts by response
+      counts <- filter(counts, PGA_response == response_level)
+      # Run Wilcoxon Rank Sum test
+      p_value <- sapply(counts[1:31], function(x) wilcox.test(x ~ counts[[timepoint]], exact = FALSE, paired = F)$p.value)
+      # Change p_value as dataframe
+      p_value <- as.data.frame(p_value)
+      # select significant results
+      p_value_0.05 <- filter(p_value, p_value < 0.05)
+      # keep the correct order after saving data
+      p_value_0.05 <- cbind(rownames(p_value_0.05),p_value_0.05)
+      write.table(p_value_0.05, paste0(output_dir, response_level, '_', timepoint, '_significant.txt'), 
+                  quote = F, row.names = F, col.names = T, sep = '\t')
+    },
+    error=function(error_condition){
+      print(paste('cound not do analysis', ':', error_condition))
+    })
+}
+
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+####################
+# main codes
+####################
+
+# Set seed
+set.seed(1234)
+
+# set the location of the vedo2_biopsy
+vedo2_scRNA_pbmc_loc <- '/groups/umcg-weersma/tmp01/projects/vedopredict2/pbmc/ongoing/cell_type_classification/objects/vedo2_pbmc_merged_clustered_azi.rds'
+
+# read the object
+vedo2_scRNA_pbmc <- readRDS(vedo2_scRNA_pbmc_loc)
+
+# generate cell counts, remove patient column, remove T2 and T3 timepoint, convert T1 to T0, and convert T5 TO T4
+vedo2_scRNA_pbmc_counts <- vedo2_scRNA_pbmc %>%
+  Create_cell_counts() %>%
+  select(-c("patient")) %>%
+  filter(!grepl("T2", timepoint) & !grepl("T3", timepoint)) %>%
+  mutate(timepoint = ifelse(timepoint == "T1", "T0", ifelse(timepoint == "T5", "T4", timepoint)))
+
+# Set output directory
+output_dir <- "/groups/umcg-weersma/tmp01/projects/vedopredict2/pbmc/ongoing/Wilcoxon_rank_sum_test/"
+
+# Analyze 4 comparisons and generate significant results
+# 1. before_nonresponders vs before_responders (before_responders as reference)
+Wilcoxon_Rank_Sum_test_1(vedo2_scRNA_pbmc_counts, "T0", "PGA_response")
+
+# 2. after_nonresponders vs after_responders (after_responders as reference)
+Wilcoxon_Rank_Sum_test_1(vedo2_scRNA_pbmc_counts, "T4", "PGA_response")
+
+# 3. after_responders vs before_responders (before_responders as reference)
+Wilcoxon_Rank_Sum_test_2(vedo2_scRNA_pbmc_counts, "yes", "timepoint")
+
+# 4. after_nonresponders vs before_nonresponders (before_nonresponders as reference)
+Wilcoxon_Rank_Sum_test_2(vedo2_scRNA_pbmc_counts, "no", "timepoint")
+
+```

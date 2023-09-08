@@ -1,0 +1,259 @@
+---
+title: "Integrated_framework_scRNA-seq_annotation"
+author: "Saman Farahmand"
+date: "01/10/2022"
+output: html_document
+---
+
+## R Markdown
+# Analysis tracking
+
++ Author: [Saman Farahmand](mailto:saman.farahmand@takeda.com)
++ Start Analysis: 12012021
++ Update Analysis: 01102022
++ Status: Complete 
+
+
+```{r echo=FALSE, warning=FALSE}
+library(slingshot)
+library(BUSpaRse)
+library(tidyverse)
+library(tidymodels)
+library(Seurat)
+library(scales)
+library(viridis)
+library(Matrix)
+library(ggplot2)
+library(ggthemes)
+library(ggbeeswarm)
+library(scmap)
+library(SingleR)
+library(dplyr)
+library(scclusteval)
+library(SCINA)
+library(data.table)
+library(scran)
+library(caret)
+
+# loading utility functions
+source("functions_util.R")
+
+```
+
+
+###  Loading Smillie Training and Testing sets: Fibroblast/Epithelium/Immune
+
+```{r}
+
+# loading the training set
+train_objects = readRDS("files/Smillie_Stromal_folds/train_objects.RDS")
+test_objects = readRDS("files/Smillie_Stromal_folds/test_objects.RDS")
+
+```
+
+
+
+## Set the flags according to the annotation methods you want to run:
+
+```{r}
+SCINA = T
+scmap_cell = T
+scmap_cluster = T
+```
+
+# Implementing the annotation workflow:
+
+We need to construct a script to get train and test seurat objects and return the annotated test object as a seurat object:
+
+There are multiple methods implemented and we can decide what mthods we want to run here:
+
+1 - SCINA = True/False # If this parameter is True, we need to feed a list of markers named with the labels
+
+2 - scmap
+
+4 - SingleR: # with or without markers
+
+
+### Running SCINA method
+
+
+### Preparing the markers for SCINA: 
+
+1 - For Epithelium cells:
+```{r}
+
+# Import original markers reported by Smillie et. al.
+markers_smillie_all = read.delim("files/smillie_markers_orig.txt",header = T, sep = "\t")
+colnames(markers_smillie_all)
+label_all=colnames(markers_smillie_all)
+markers = as.list(label_all)
+names(markers) = label_all
+for (marker in markers){
+    markers[[marker]] = markers_smillie_all[[marker]][markers_smillie_all[[marker]]!=""]
+}
+# names is optional: for syncing the labels with other references we have
+# It should be consistent with the order of columns in the marker table
+
+## For Epithelial cells
+names = c("Enterocyte Progenitors", "Immature Enterocytes 1",  "Immature Enterocytes 2",  "Enterocytes","Best4+ Enterocytes","Stem","Secretory TA", "Cycling TA","TA 1","TA 2","Enteroendocrine", "Goblet", "Immature Goblet","M cells","Tuft")
+
+
+names(markers) = names
+
+
+# Import refined set of markers
+markers_smillie_refined = read.csv("files/geneSets_flt_markers_refined_CD8_IELs.txt",header = T, sep = "\t")
+markers_smillie_refined = markers_smillie_refined %>% dplyr::select(c("ident", "gene"))
+smillie_celltypes=unique(markers_smillie_refined$ident)
+smillie_markers = as.list(smillie_celltypes)
+names(smillie_markers) = smillie_celltypes
+
+for (cell in smillie_markers){
+  smillie_markers[[cell]] = markers_smillie_refined[markers_smillie_refined$ident==cell,"gene"]
+}
+
+cell_types = c("Goblet", "Immature Goblet", "Goblet", "Tuft", "TA", "Secretory TA", "Cycling TA", "Enteroendocrine", "Stem", "TA 2", "TA 1", "Enterocytes","Enterocyte Progenitors", "M cells", "Best4+ Enterocytes", "Immature Enterocytes 1" , "Immature Enterocytes 2")
+## Filter in only Epithelial cells
+smillie_markers = smillie_markers[names(smillie_markers) %in% cell_types ]
+
+
+
+```
+
+2 - For Fibroblast cells:
+
+```{r}
+
+# Import original markers reported by Smillie et. al.
+markers_smillie_all = read.delim("files/Fibro_markers.csv",header = T, sep = ",")
+colnames(markers_smillie_all)
+label_all=colnames(markers_smillie_all)
+markers = as.list(label_all)
+names(markers) = label_all
+for (marker in markers){
+    markers[[marker]] = markers_smillie_all[[marker]][markers_smillie_all[[marker]]!=""]
+}
+# names is optional: for syncing the labels with other references we have
+# It should be consistent with the order of columns in the marker table
+
+## For Epithelial cells
+names = c("Myofibroblasts", "WNT2B+ Fos-hi",  "WNT2B+ Fos-lo 1",  "WNT2B+ Fos-lo 2","RSPO3+","WNT5B+ 1","WNT5B+ 2", "Inflammatory Fibroblasts","Endothelial","Microvascular","Post-capillary Venules", "Pericytes")
+
+names(markers) = names
+
+
+
+```
+
+3 - For Immune cells:
+```{r}
+# Import original markers reported by Smillie et. al.
+markers_smillie_all = read.delim("files/immune_markers.txt",header = T, sep = "\t")
+colnames(markers_smillie_all)
+label_all=colnames(markers_smillie_all)
+markers = as.list(label_all)
+names(markers) = label_all
+for (marker in markers){
+    markers[[marker]] = markers_smillie_all[[marker]][markers_smillie_all[[marker]]!=""]
+}
+# names is optional: for syncing the labels with other references we have
+# It should be consistent with the order of columns in the marker table
+
+## For Epithelial cells
+names = c("DC1",	"DC2",	"CD69+ Mast",	"CD69- Mast",	"Macrophages",	"Cycling Monocytes",	"Inflammatory Monocytes",	"NKs",	"ILCs",	"Cycling T",	"Tregs", "CD4+ Activated Fos-hi",	"CD4+ Activated Fos-lo",	"CD4+ Memory",	"CD4+ PD1+",	"MT-hi",	"CD8+ IELs",	"CD8+ IL17+",	"CD8+ LP",	"Follicular",	"GC",	"Cycling B")
+
+names(markers) = names
+
+
+
+```
+
+
+
+```{r}
+
+
+# with original markers
+if(SCINA) {
+  for(i in c(1:length(test_objects))){
+      test_objects[[i]] = Run_SCINA(test_objects[[i]],markers = markers)
+      test_objects[[i]]$SCINA_orig = test_objects[[i]]$SCINA
+      
+  }
+}
+
+```
+
+
+## Run scmap cluster and cell methods
+
+
+```{r}
+
+for(i in c(1:length(test_objects))){
+      test_objects[[i]] = Run_Scmap(train_objects[[i]],test_objects[[i]],ref_assay ="RNA", query_assay = "RNA",
+                                    scmap_cell = T,
+                                    scmap_cluster = T,
+                                    n_features=500, Cluster="Cluster")
+}
+
+```
+
+
+
+# Save the test and train objects 
+ We'll use test_object for SingleR runs separately
+
+```{r}
+saveRDS(test_objects,"files/Smillie_Stromal_folds/test_objects.RDS")
+saveRDS(train_objects,"files/Smillie_Stromal_folds/train_objects.RDS")
+
+
+```
+
+
+
+## Running SingleR algorithm. It has three versions:
+1 - without markers
+2 - with list of markers corresponding to each cell type
+3 - with DE markers corresponding to each paiwise comparisons
+
+# You can run the script by selecting one of these options or all together
+
+```{r}
+
+######## You need to run SingleR_CV.R script 
+
+```
+
+## Integrating all the annotations in a single object:
+
+```{r}
+
+seur_SRde=readRDS("files/Smillie_Stromal_folds/test_objects_de.RDS")
+
+for (i in c(1:length(test_objects))){
+  test_objects[[i]]$singleRde = seur_SRde[[i]]$singleRDE
+}
+
+```
+
+
+# let's imlement the majority voting
+
+```{r echo=FALSE, warning=FALSE}
+
+annotation_columns = c("SCINA_orig","singleRde","scPred","Azimuth")
+
+for (i in c(1:5)){
+  test_objects[[i]]$consensus_lab = apply(test_objects[[i]]@meta.data[,annotation_columns], 1, get_consensus_label)
+}
+
+
+```
+
+
+
+
+
+

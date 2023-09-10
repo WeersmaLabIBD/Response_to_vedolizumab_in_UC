@@ -1,8 +1,8 @@
 # Vedolizumab-Predict
 
-Repository of the code used in the Vedolizumab-Predict project
+Repository of the code used in the Vedolizumab-Predict project.
 
-The steps for replicating the results of this study are grouped into categories
+The steps for replicating the results of this study are grouped into categories, and each in its own subdirectory including a README file.
 
 # Contents
 
@@ -23,16 +23,7 @@ steps should be done in this order, to replicate the results
 
 ## alignment
 
-1.  '*pre_preprocessing/alignment/lpmcv2_upload_badly_named_lanes.sh*' This will upload the BGI lanes to the cluster for the 2021 data
-
-2.  '*pre_preprocessing/alignment/lpmcv2_rename_lanes.sh*' This will rename the BGI lanes to the format that CellRanger understands for the 2021 data
-
-3.  '*pre_preprocessing/lpmcv2_move_batch2_fastqs*' this will move the BGI lanes to the correct directories for the 2022 data
-
-4.  '*pre_preprocessing/alignment/lpmcv2_create_cellranger_jobs_introns*' This will create jobs to run each 10x lane through CellRanger. These jobs are then to be submitted
-
-5.  '*pre_preprocessing/alignment/lpmcv2_download_websummaries*' This will download the web summary file outputs of Cellranger
-
+The 1_Alignment contains the script 'Cellranger script' which would create jobs to run each 10x lane through CellRanger.
 
 ## demultiplexing
 

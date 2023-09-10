@@ -1,8 +1,8 @@
 # Vedolizumab-Predict
 
-Repository of the code used in the LPMC v2 / CHANGE project
+Repository of the code used in the Vedolizumab-Predict project
 
-The steps for replicating the results of this study, are grouped in categories
+The steps for replicating the results of this study are grouped into categories
 
 # Contents
 

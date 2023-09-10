@@ -1,6 +1,8 @@
 # CellRanger analysis
 
-The 'Cellranger_analysis' contains codes for processing single-cell RNA sequencing (scRNA-seq) data using cellranger version 3.1.0.
+The starting point for the analysis is single-cell RNA-seq (scRNA-seq) data generated with the Chromium 10X and mapped using [cellranger](https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/what-is-cell-ranger).
+
+The 'Cellranger_analysis' contains codes for processing scRNA-seq data using cellranger version 3.1.0.
 
 ## Prerequisites
 Environment: The pipeline is designed to run on a Slurm cluster.

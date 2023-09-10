@@ -1,11 +1,15 @@
 # Demultiplexing and doublet detection
 
 This repository contains a pipeline for demultiplexing and doublet detection from Vedolizumab-Predict scRNA-seq data.
+
 'Souporcell_analysis' provides an example of how the functions as a pipeline for assignments of cells to the donor. 
+
 'Hashtag_calling.R' provides the functions for demultiplexing and doublet detection.
 
 ## Souporcell Analysis Pipeline 
-插入原始的SouperCell 链接
+
+Clustering mixed-genotype scRNAseq experiments by individual using [souporcell](https://github.com/wheaton5/souporcell)
+
 ### Prerequisites
 Environment: The pipeline is designed to run on a SLURM cluster.
 Software:
@@ -18,7 +22,7 @@ vartrix
 Reference Data: The pipeline uses the GRCh38 human genome reference.
 
 ### Pipeline Overview
-1. Setup: The script starts by defining SLURM job requirements.
+1. Setup: The script starts by defining Slurm job requirements.
 2. Renaming: Using renamer_v2.py, the BAM files are renamed based on the barcodes provided.3
 3. Remapping: The renamed sequences are remapped to the reference genome using minimap2.4
 4. Retagging: The SAM file from the remapping step is retagged using retag_v2.py.5

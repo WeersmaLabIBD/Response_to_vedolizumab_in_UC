@@ -25,5 +25,5 @@ steps should be done in this order, to replicate the results
 
 The 1_Alignment contains the script 'Cellranger_script' which would create jobs to run each 10x lane through CellRanger.
 
-## demultiplexing, double detection, and QC
+## Demultiplexing, double detection, and QC
 

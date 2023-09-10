@@ -5,7 +5,7 @@ This repository contains a pipeline for demultiplexing and doublet detection fro
 'Hashtag_calling.R' provides the functions for demultiplexing and doublet detection.
 
 ## Souporcell Analysis Pipeline 
-
+插入原始的SouperCell 链接
 ### Prerequisites
 Environment: The pipeline is designed to run on a SLURM cluster.
 Software:
@@ -33,3 +33,4 @@ Reference Data: The pipeline uses the GRCh38 human genome reference.
 2. Modify the Slurm directives (#SBATCH lines) at the beginning of the script to fit your cluster's requirements.3.
 3. Ensure the paths for output, error, transcriptome, libraries, and other references are correctly set in the script.
 4. Submit the script to your Slurm cluster using the sbatch command.
+

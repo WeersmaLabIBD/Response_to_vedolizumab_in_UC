@@ -4,7 +4,7 @@ This repository contains a pipeline for demultiplexing and doublet detection fro
 
 'Souporcell_analysis' provides an example of how the functions as a pipeline for assignments of cells to the donor. 
 
-'Hashtag_calling.R' provides the functions for demultiplexing and doublet detection.
+'Hashtag_calling.R' provides the functions for preprocessing scRNA-seq data. The script processes data from CellRanger and integrates Souporcell toolkit results for genotype deconvolution.
 
 ## Souporcell Analysis Pipeline 
 
@@ -32,9 +32,30 @@ Reference Data: The pipeline uses the GRCh38 human genome reference.
 8. Clustering: Cells are clustered based on their genotypes using Souporcell.9.
 9. Doublet Detection: Doublets (or cells resulting from two cells being sequenced as one) are detected using trouble.
 
-### Usage
-1. Clone this repository to your local machine.
-2. Modify the Slurm directives (#SBATCH lines) at the beginning of the script to fit your cluster's requirements.3.
-3. Ensure the paths for output, error, transcriptome, libraries, and other references are correctly set in the script.
-4. Submit the script to your Slurm cluster using the sbatch command.
+## Hashtag calling Pipeline 
 
+The vignette of demultiplexing with hashtag oligos (HTOs) in [Seurat](https://satijalab.org/seurat/articles/hashing_vignette)
+
+
+### Prerequisites
+R Environment: Ensure you have R installed along with the necessary packages.
+
+Data:
+The output from CellRanger (UMI count matrix).
+Results from Souporcell for genotype deconvolution.
+
+### Script Overview
+1. Read CellRanger Output: The script starts by reading the UMI count matrix using Read10X function.
+2. Data Initialization: A Seurat object is created and subsetting is done to keep cells with more than 200 RNA counts.
+3. HTO Demultiplexing: Cells are demultiplexed based on HTO data using the HTODemux function.
+4. Integrate Souporcell Results: The results from the Souporcell toolkit are integrated to determine the genotype of each cell.
+5. QC and Preprocessing:
+6. Mitochondrial genes are calculated and visualized.
+7. Data is filtered based on QC metrics.
+8. Data normalization, scaling, and variable feature selection is performed.
+9. Dimensionality Reduction and Clustering:
+10. PCA is computed.
+11. UMAP is used for dimensionality reduction.
+12. Clusters are identified using shared nearest neighbor (SNN) modularity optimization.
+13. Visualization: Visualization of clusters using DimPlot and gene expression visualization using FeaturePlot.
+14. Save Processed Data: The processed Seurat object is saved for further analysis.

@@ -1,6 +1,6 @@
 # CellRanger analysis
 
-The 'Cellranger script' contains codes for processing single-cell RNA sequencing (scRNA-seq) data using cellranger version 3.1.0.
+The 'Cellranger_analysis' contains codes for processing single-cell RNA sequencing (scRNA-seq) data using cellranger version 3.1.0.
 
 ## Prerequisites
 Environment: The pipeline is designed to run on a Slurm cluster.

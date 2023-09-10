@@ -11,7 +11,7 @@ This repository contains a pipeline for demultiplexing and doublet detection fro
 Clustering mixed-genotype scRNAseq experiments by individual using [souporcell](https://github.com/wheaton5/souporcell)
 
 ### Prerequisites
-Environment: The pipeline is designed to run on a SLURM cluster.
+Environment: The pipeline is designed to run on a Slurm cluster.
 Software:
 souporcell toolkit
 PythonPlus

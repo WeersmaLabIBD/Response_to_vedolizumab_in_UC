@@ -6,7 +6,9 @@ The 'Cellranger_analysis' contains codes for processing scRNA-seq data using cel
 
 ## Prerequisites
 Environment: The pipeline is designed to run on a Slurm cluster.
+
 Software: cellranger version 3.1.0.
+
 Reference Data: The pipeline uses the GRCh38 human genome reference (version 3.1.0).
 
 ## Pipeline Overview

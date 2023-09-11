@@ -21,7 +21,7 @@ The steps for replicating the results of this study are grouped into categories,
 
 steps should be done in this order, to replicate the results
 
-## alignment
+## Alignment of the sequence data to the GRCh38 reference Human Genome
 
 The 1_Alignment contains the script 'Cellranger_script' which would create jobs to run each 10x lane through CellRanger.
 

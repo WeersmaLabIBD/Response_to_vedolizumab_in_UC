@@ -55,7 +55,7 @@ Results from Souporcell for genotype deconvolution.
   - Mitochondrial genes are calculated and visualized.
   - Data is filtered based on QC metrics.
   - Data normalization, scaling, and variable feature selection is performed.
-6. Dimensionality Reduction and Clustering:
+6. **Dimensionality Reduction and Clustering**:
   - PCA is computed.
   - UMAP is used for dimensionality reduction.
   - Clusters are identified using shared nearest neighbor (SNN) modularity optimization.

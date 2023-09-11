@@ -12,6 +12,7 @@ Clustering mixed-genotype scRNAseq experiments by individual using [souporcell](
 
 ### Prerequisites
 **Environment**: The pipeline is designed to run on a Slurm cluster.
+
 **Software**:
 souporcell toolkit
 PythonPlus
@@ -19,6 +20,7 @@ minimap2
 SAMtools
 freebayes
 vartrix
+
 **Reference Data**: The pipeline uses the GRCh38 human genome reference.
 
 ### Pipeline Overview

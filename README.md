@@ -1,4 +1,4 @@
-# Vedolizumab-Predict
+# Response to vedolizumab in UC
 
 Repository of the code used in the Vedolizumab-Predict project.
 

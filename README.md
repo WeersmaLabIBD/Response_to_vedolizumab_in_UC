@@ -1,10 +1,29 @@
-# Response to vedolizumab in UC
+# Vedo2 Project
 
-Repository of the code used in the Vedolizumab-Predict project.
+The repository for the code used in the Vedolizumab-Predict project and manuscript called "High-dimensional single-cell analysis identifies cellular signatures associated with response to vedolizumab therapy in ulcerative colitis".
 
 The steps for replicating the results of this study are grouped into categories, and each in its own subdirectory including a README file.
 
-# Contents
+# Overview 
+
+For each different step of the scRNAseq analysis, separate codes were generated. Languages and packages are listed below: 
+
+- R >= 3.6.1
+- Seurat >= 3.1
+
+
+External tools used were:
+
+- Souporcell v.1: https://github.com/wheaton5/souporcell
+- Cellranger v.3.0.2: https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/installation
+- Azimuth v: https://azimuth.hubmapconsortium.org/
+- fido v.1.0.2:
+- ClusterProfiler v.4.4.4: https://learn.gencore.bio.nyu.edu/rna-seq-analysis/gene-set-enrichment-analysis/
+- Cellchat v.1.4.0: http://www.cellchat.org/
+- nichenetr v.1.1.0: https://github.com/saeyslab/nichenetr/blob/master/vignettes/seurat_steps.md
+
+
+the content for each step includes:
 
 -   Alignment of the sequence data to the GRCh38 reference Human Genome
 -   Demultiplexing, doublet_detection, and quality control (QC) 

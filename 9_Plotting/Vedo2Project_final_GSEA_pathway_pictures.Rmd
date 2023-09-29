@@ -1,0 +1,541 @@
+---
+title: "GSEA pathway analysis final figures"
+author: "Paola Pibiri"
+output: html_document
+---
+
+```{r header, include=FALSE}
+############################################################################################################################
+# Authors: Paola Pibiri
+# Name: Vedo2Project_final_GSEA_pathway_pictures.Rmd
+# Function: check the cell-cell communications between 1 receiver cell and multiple sender cells 
+############################################################################################################################
+```
+
+
+```{r libraries, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+####################
+# libraries        #
+####################
+
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+library(Seurat)
+
+```
+
+## Final GSEA figure Inflammatory Monocytes Biopsy
+```{r inflammatory monocytes biopsy, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#read the files for responders and non responders 
+# the inputs here indicated are the two splitted files (positive and negative NES) deriving from the GO cluster profiler analysis
+
+mono_responders <- read.table('/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/GSEA_final_results/inf_mono_biopsy/gsea_files/Inf_monocytes_gsea_responders_biopsy.tsv',
+                              sep='\t',
+                              header = T)
+
+mono_nonresponders <- read.table('/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/GSEA_final_results/inf_mono_biopsy/gsea_files/Inf_mono_gsea_non_responders_biopsy.tsv',
+                                 sep='\t',
+                                 header = T)
+
+
+# merge the columns of pathways description and pathway GO term together 
+mono_responders$Term <- paste(mono_responders$Pathways, mono_responders$GO)
+mono_nonresponders$Term <- paste(mono_nonresponders$Pathways, mono_nonresponders$GO)
+
+# split the element of the columns by /
+mono_responders$core_enrichment_v1 <- strsplit(mono_responders$core_enrichment, "/")
+mono_nonresponders$core_enrichment_v1 <- strsplit(mono_nonresponders$core_enrichment, "/")
+
+# count the number of genes per row of the enrichment core and create a new column with the count
+for (i in 1:length(mono_responders$core_enrichment_v1)) {
+  column <- length(mono_responders$core_enrichment_v1[[i]])
+  mono_responders[i, 'core_enrichment_v2'] <- column
+}
+
+for (i in 1:length(mono_nonresponders$core_enrichment_v1)) {
+  column <- length(mono_nonresponders$core_enrichment_v1[[i]])
+  mono_nonresponders[i, 'core_enrichment_v2'] <- column
+}
+
+#create a new column called Overlap indicating the ratio of the enrichment genes/ setsize
+
+mono_responders$Fraction <- mono_responders$core_enrichment_v2/mono_responders$setSize
+mono_nonresponders$Fraction <- mono_nonresponders$core_enrichment_v2/mono_nonresponders$setSize
+
+
+#select only the relevant columns
+mono_responders_subset <- mono_responders %>% select('Term', 'Fraction', 'p.adjust')
+mono_nonresponders_subset <- mono_nonresponders %>% select('Term', 'Fraction', 'p.adjust')
+
+#transform the p adjusted value in -log
+mono_responders_subset$log10 <- -log10(mono_responders_subset$p.adjust)
+mono_nonresponders_subset$log10 <- -log10(mono_nonresponders_subset$p.adjust)
+
+# define the pathway list that you want to show
+pathway_list <- c('response to external stimulus GO:0009605', 'response to molecule of bacterial origin GO:0002237',
+                  'response to endogenous stimulus GO:0009719', 'cellular response to cytokine stimulus GO:0071345',
+                  'inflammatory response GO:0006954', 'regulation of immune response GO:0050776',
+                  'adaptive immune response GO:0002250', 'leukocyte activation GO:0045321',
+                  'activation of innate immune response GO:0002218', 'regulation of lymphocyte mediated immunity GO:0002706',
+                  'cell surface receptor signaling pathway GO:0007166', 'macromolecule metabolic process GO:0043170',
+                  'cellular component organization or biogenesis GO:0071840', 'amide metabolic process GO:0043603')
+
+
+
+# define the order of the pathways as in the pathway list
+mono_nonresponders_subset$Term <- factor(mono_nonresponders_subset$Term, levels = pathway_list)
+mono_responders_subset$Term <- factor(mono_responders_subset$Term, levels = pathway_list)
+
+Responders_Term <- unique(mono_responders_subset$Term)
+Non_Responders_Term <- unique(mono_nonresponders_subset$Term)
+
+# create the empty new tables
+mono_responders_df <- data.frame(Term = rep(NA, times = length(Responders_Term)),
+                                 Log10 = rep(NA, times = length(Responders_Term)),
+                                 Fraction = rep(NA, times = length(Responders_Term)))
+
+mono_nonresponders_df <- data.frame(Term = rep(NA, times = length(Non_Responders_Term)),
+                                    Log10 = rep(NA, times = length(Non_Responders_Term)),
+                                    Fraction = rep(NA, times = length(Non_Responders_Term)))
+
+
+#fill the table with -log10 mean, mean of the fraction, and term, means name of the macrocathegory of the pathways 
+for (i in 1:length(Responders_Term)) {
+  term <- as.character(Responders_Term[i])
+  subset_term <- mono_responders_subset[mono_responders_subset$Term == term, ]
+  log10_mean <- mean(subset_term$log10)
+  fraction_mean <- mean(subset_term$Fraction)
+  mono_responders_df[i, c('Term', 'Log10', 'Fraction')] <- c(term, log10_mean, fraction_mean)
+}
+
+mono_responders_df$Term <- factor(mono_responders_df$Term, levels = pathway_list)
+
+for (i in 1:length(Non_Responders_Term)) {
+  term <- as.character(Non_Responders_Term[i])
+  subset_term <- mono_nonresponders_subset[mono_nonresponders_subset$Term == term, ]
+  log10_mean <- mean(subset_term$log10)
+  fraction_mean <- mean(subset_term$Fraction)
+  mono_nonresponders_df[i, c('Term', 'Log10', 'Fraction')] <- c(term, log10_mean, fraction_mean)
+}
+
+mono_nonresponders_df$Term <- factor(mono_nonresponders_df$Term, levels = pathway_list)
+
+#create a new column for dividing pathways of R and NR
+mono_responders_df$response <- 'Responders'
+mono_nonresponders_df$response <- 'Non-Responders'
+
+#transoform in numeric the number in the Log10 and Fraction columns
+mono_nonresponders_df$Log10 <- as.numeric(mono_nonresponders_df$Log10)
+mono_nonresponders_df$Fraction <- as.numeric(mono_nonresponders_df$Fraction)
+mono_responders_df$Log10 <- as.numeric(mono_responders_df$Log10)
+mono_responders_df$Fraction <- as.numeric(mono_responders_df$Fraction)
+
+
+#merge two data frames
+monocytes_T0_NR_R_DE <- rbind(mono_responders_df, mono_nonresponders_df)
+
+p <- ggplot(data=monocytes_T0_NR_R_DE, mapping = aes(x=response, y=Term, color=Log10, size=Fraction)) +
+  geom_point() +
+  scale_color_gradient(low='darkturquoise', high='orchid') + 
+  theme(text = element_text(size = 15)) + 
+  xlab('Response') + 
+  ylab('Pathways') + 
+  labs(color = '-log10(p)')
+
+```
+
+
+## Final GSEA figure Monocytes PBMCs
+```{r monocytes pbmc, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#read the files for responders and non responders 
+
+mono_responders <- read.table('/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/GSEA_final_results/inf_mono_pbmc/gsea_files/inf_mono_gsea_pbmc_responders.tsv',
+                              sep='\t',
+                              header = T)
+
+mono_nonresponders <- read.table('/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/GSEA_final_results/inf_mono_pbmc/gsea_files/inf_mono_gsea_pbmc_non_responders.tsv',
+                                 sep='\t',
+                                 header = T)
+
+
+# merge the columns of pathways description and pathway GO term together 
+
+mono_responders$Term <- paste(mono_responders$Pathways, mono_responders$GO)
+mono_nonresponders$Term <- paste(mono_nonresponders$Pathways, mono_nonresponders$GO)
+
+# split the element of the columns by /
+mono_responders$core_enrichment_v1 <- strsplit(mono_responders$core_enrichment, "/")
+mono_nonresponders$core_enrichment_v1 <- strsplit(mono_nonresponders$core_enrichment, "/")
+
+# count the number of genes per row of the enrichment core and create a new column with the count
+for (i in 1:length(mono_responders$core_enrichment_v1)) {
+  column <- length(mono_responders$core_enrichment_v1[[i]])
+  mono_responders[i, 'core_enrichment_v2'] <- column
+}
+
+for (i in 1:length(mono_nonresponders$core_enrichment_v1)) {
+  column <- length(mono_nonresponders$core_enrichment_v1[[i]])
+  mono_nonresponders[i, 'core_enrichment_v2'] <- column
+}
+
+#create a new column called Overlap indicating the ratio of the enrichment genes/ setsize
+
+mono_responders$Fraction <- mono_responders$core_enrichment_v2/mono_responders$setSize
+mono_nonresponders$Fraction <- mono_nonresponders$core_enrichment_v2/mono_nonresponders$setSize
+
+
+#select only the relevant columns
+mono_responders_subset <- mono_responders %>% select('Term', 'Fraction', 'p.adjust')
+mono_nonresponders_subset <- mono_nonresponders %>% select('Term', 'Fraction', 'p.adjust')
+
+#transform the p adjusted value in -log
+mono_responders_subset$log10 <- -log10(mono_responders_subset$p.adjust)
+mono_nonresponders_subset$log10 <- -log10(mono_nonresponders_subset$p.adjust)
+
+# define the pathway list that you want to show
+
+pathway_list <- c('acute inflammatory response GO:0002526', 'antimicrobial humoral response GO:0019730',
+                  'cellular response to biotic stimulus GO:0071216', 'cellular response to cytokine stimulus GO:0071345',
+                  'cellular response to growth factor stimulus GO:0071363', 'cellular response to stress GO:0033554',
+                  'chemokine production GO:0032602', 'chemokine-mediated signaling pathway GO:0070098',
+                  'granulocyte migration GO:0097530', 'humoral immune response GO:0006959',
+                  'intracellular receptor signaling pathway GO:0030522', 'leukocyte differentiation GO:0002521',
+                  'macrophage activation GO:0042116', 'monocyte chemotaxis GO:0002548',
+                  'mononuclear cell migration GO:0071674', 'myeloid cell differentiation GO:0030099',
+                  'myeloid cell homeostasis GO:0002262', 'nitrogen compound metabolic process GO:0006807',
+                  'organic substance metabolic process GO:0071704', 'regulation of apoptotic signaling pathway GO:2001233',
+                  'regulation of heterotypic cell-cell adhesion GO:0034114', 'response to hypoxia GO:0001666',
+                  'response to molecule of bacterial origin GO:0002237', 'response to organic substance GO:0010033',
+                  'ribonucleoprotein complex biogenesis GO:0022613', 'T cell differentiation GO:0030217',
+                  'response to endogenous stimulus GO:0009719', 'MHC protein complex assembly GO:0002396',
+                  'antigen processing and presentation GO:0019882', 'cyclic nucleotide metabolic process GO:0006198',
+                  'immunoglobulin mediated immune response GO:0016064')
+
+
+
+
+# let's make these a bit more compact
+#pathway_list_compact <- gsub(' G0:', '\nGO:', pathway_list)
+# and make into mapping
+#pathway_list_compact_dict <- as.list(pathway_list_compact)
+#names(pathway_list_compact_dict) <- pathway_list
+
+mono_nonresponders_subset$Term <- factor(mono_nonresponders_subset$Term, levels = pathway_list)
+mono_responders_subset$Term <- factor(mono_responders_subset$Term, levels = pathway_list)
+
+Responders_Term <- unique(mono_responders_subset$Term)
+Non_Responders_Term <- unique(mono_nonresponders_subset$Term)
+
+# create the empty new tables
+
+mono_responders_df <- data.frame(Term = rep(NA, times = length(Responders_Term)),
+                                 Log10 = rep(NA, times = length(Responders_Term)),
+                                 Fraction = rep(NA, times = length(Responders_Term)))
+
+mono_nonresponders_df <- data.frame(Term = rep(NA, times = length(Non_Responders_Term)),
+                                    Log10 = rep(NA, times = length(Non_Responders_Term)),
+                                    Fraction = rep(NA, times = length(Non_Responders_Term)))
+
+
+for (i in 1:length(Responders_Term)) {
+  term <- as.character(Responders_Term[i])
+  subset_term <- mono_responders_subset[mono_responders_subset$Term == term, ]
+  log10_mean <- mean(subset_term$log10)
+  fraction_mean <- mean(subset_term$Fraction)
+  mono_responders_df[i, c('Term', 'Log10', 'Fraction')] <- c(term, log10_mean, fraction_mean)
+}
+
+mono_responders_df$Term <- factor(mono_responders_df$Term, levels = pathway_list)
+
+for (i in 1:length(Non_Responders_Term)) {
+  term <- as.character(Non_Responders_Term[i])
+  subset_term <- mono_nonresponders_subset[mono_nonresponders_subset$Term == term, ]
+  log10_mean <- mean(subset_term$log10)
+  fraction_mean <- mean(subset_term$Fraction)
+  mono_nonresponders_df[i, c('Term', 'Log10', 'Fraction')] <- c(term, log10_mean, fraction_mean)
+}
+
+mono_nonresponders_df$Term <- factor(mono_nonresponders_df$Term, levels = pathway_list)
+
+#create a new column for dividing pathways of R and NR
+mono_responders_df$response <- 'Responders'
+mono_nonresponders_df$response <- 'Non-Responders'
+mono_nonresponders_df$Log10 <- as.numeric(mono_nonresponders_df$Log10)
+mono_nonresponders_df$Fraction <- as.numeric(mono_nonresponders_df$Fraction)
+mono_responders_df$Log10 <- as.numeric(mono_responders_df$Log10)
+mono_responders_df$Fraction <- as.numeric(mono_responders_df$Fraction)
+
+
+#merge two data frames
+monocytes_T0_NR_R_DE <- rbind(mono_responders_df, mono_nonresponders_df)
+
+p <- ggplot(data=monocytes_T0_NR_R_DE, mapping = aes(x=response, y=Term, color=Log10, size=Fraction)) +
+  geom_point() +
+  scale_color_gradient(low='darkturquoise', high='orchid') + 
+  theme(text = element_text(size = 15)) + 
+  xlab('Response') + 
+  ylab('Pathways') + 
+  labs(color = '-log10(p)')
+
+```
+
+## Final GSEA figure Inflammatory Fibroblasts Biopsy
+```{r inflammatory fibroblasts biopsy, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#read the files for responders and non responders 
+
+fibro_responders <- read.table('/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/GSEA_final_results/inf_fibro_biopsy/gsea_files/inf_fibroblasts_gsea_biopsy_responders.tsv',
+                               sep='\t',
+                               header = T)
+
+fibro_nonresponders <- read.table('/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/GSEA_final_results/inf_fibro_biopsy/gsea_files/inf_fibroblasts_gsea_biopsy_non_responders.tsv',
+                                  sep='\t',
+                                  header = T)
+
+
+
+
+# merge the columns of pathways description and pathway GO term together 
+
+fibro_responders$Term <- paste(fibro_responders$Pathways, fibro_responders$GO)
+fibro_nonresponders$Term <- paste(fibro_nonresponders$Pathways, fibro_nonresponders$GO)
+
+# split the element of the columns by /
+fibro_responders$core_enrichment_v1 <- strsplit(fibro_responders$core_enrichment, "/")
+fibro_nonresponders$core_enrichment_v1 <- strsplit(fibro_nonresponders$core_enrichment, "/")
+
+# count the number of genes per row of the enrichment core and create a new column with the count
+for (i in 1:length(fibro_responders$core_enrichment_v1)) {
+  column <- length(fibro_responders$core_enrichment_v1[[i]])
+  fibro_responders[i, 'core_enrichment_v2'] <- column
+}
+
+for (i in 1:length(fibro_nonresponders$core_enrichment_v1)) {
+  column <- length(fibro_nonresponders$core_enrichment_v1[[i]])
+  fibro_nonresponders[i, 'core_enrichment_v2'] <- column
+}
+
+#create a new column called Overlap indicating the ratio of the enrichment genes/ setsize
+
+fibro_responders$Fraction <- fibro_responders$core_enrichment_v2/fibro_responders$setSize
+fibro_nonresponders$Fraction <- fibro_nonresponders$core_enrichment_v2/fibro_nonresponders$setSize
+
+
+#select only the relevant columns
+fibro_responders_subset <- fibro_responders %>% select('Term', 'Fraction', 'p.adjust')
+fibro_nonresponders_subset <- fibro_nonresponders %>% select('Term', 'Fraction', 'p.adjust')
+
+#transform the p adjusted value in -log
+fibro_responders_subset$log10 <- -log10(fibro_responders_subset$p.adjust)
+fibro_nonresponders_subset$log10 <- -log10(fibro_nonresponders_subset$p.adjust)
+
+# define the pathway list that you want to show
+
+
+pathway_list <- c('wound healing GO:0042060', 'coagulation GO:0050817',
+                  'regulation of hemostasis GO:1900046', 'smooth muscle cell migration GO:0014909',
+                  'regulation of response to wounding GO:1903034', 'smooth muscle contraction GO:0006939',
+                  'adaptive immune response GO:0002250', 'cellular response to cytokine stimulus GO:0071345',
+                  'chemokine-mediated signaling pathway GO:0070098', 'granulocyte migration GO:0097530', 
+                  'extracellular matrix disassembly GO:0022617', 'inflammatory response GO:0006954',
+                  'leukocyte chemotaxis GO:0030595', 'mononuclear cell migration GO:0071674',
+                  'regulation of chemotaxis GO:0050920',
+                  'regulation of immune response GO:0050776', 'regulation of leukocyte migration GO:0002685',
+                  'response to organic substance GO:0010033', 'response to molecule of bacterial origin GO:0002237',
+                  'response to type II interferon GO:0034341', 'T cell chemotaxis GO:0010818')
+
+
+
+
+fibro_nonresponders_subset$Term <- factor(fibro_nonresponders_subset$Term, levels = pathway_list)
+fibro_responders_subset$Term <- factor(fibro_responders_subset$Term, levels = pathway_list)
+
+Responders_Term <- unique(fibro_responders_subset$Term)
+Non_Responders_Term <- unique(fibro_nonresponders_subset$Term)
+
+# create the empty new tables
+
+fibro_responders_df <- data.frame(Term = rep(NA, times = length(Responders_Term)),
+                                  Log10 = rep(NA, times = length(Responders_Term)),
+                                  Fraction = rep(NA, times = length(Responders_Term)))
+
+fibro_nonresponders_df <- data.frame(Term = rep(NA, times = length(Non_Responders_Term)),
+                                     Log10 = rep(NA, times = length(Non_Responders_Term)),
+                                     Fraction = rep(NA, times = length(Non_Responders_Term)))
+
+
+for (i in 1:length(Responders_Term)) {
+  term <- as.character(Responders_Term[i])
+  subset_term <- fibro_responders_subset[fibro_responders_subset$Term == term, ]
+  log10_mean <- mean(subset_term$log10)
+  fraction_mean <- mean(subset_term$Fraction)
+  fibro_responders_df[i, c('Term', 'Log10', 'Fraction')] <- c(term, log10_mean, fraction_mean)
+}
+
+fibro_responders_df$Term <- factor(fibro_responders_df$Term, levels = pathway_list)
+
+for (i in 1:length(Non_Responders_Term)) {
+  term <- as.character(Non_Responders_Term[i])
+  subset_term <- fibro_nonresponders_subset[fibro_nonresponders_subset$Term == term, ]
+  log10_mean <- mean(subset_term$log10)
+  fraction_mean <- mean(subset_term$Fraction)
+  fibro_nonresponders_df[i, c('Term', 'Log10', 'Fraction')] <- c(term, log10_mean, fraction_mean)
+}
+
+fibro_nonresponders_df$Term <- factor(fibro_nonresponders_df$Term, levels = pathway_list)
+
+#create a new column for dividing pathways of R and NR
+fibro_responders_df$response <- 'Responders'
+fibro_nonresponders_df$response <- 'Non-Responders'
+fibro_nonresponders_df$Log10 <- as.numeric(fibro_nonresponders_df$Log10)
+fibro_nonresponders_df$Fraction <- as.numeric(fibro_nonresponders_df$Fraction)
+fibro_responders_df$Log10 <- as.numeric(fibro_responders_df$Log10)
+fibro_responders_df$Fraction <- as.numeric(fibro_responders_df$Fraction)
+
+
+#merge two data frames
+fibrocytes_T0_NR_R_DE <- rbind(fibro_responders_df, fibro_nonresponders_df)
+
+write.table(fibrocytes_T0_NR_R_DE, '/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/GSEA_final_results/inf_fibro_biopsy/table_input.tsv', sep='\t', col.names = T)
+
+p <- ggplot(data=fibrocytes_T0_NR_R_DE, mapping = aes(x=response, y=Term, color=Log10, size=Fraction)) +
+  geom_point() +
+  scale_color_gradient(low='darkturquoise', high='orchid') + 
+  theme(text = element_text(size = 15)) + 
+  xlab('Response') + 
+  ylab('Pathways') + 
+  labs(color = '-log10(p)')
+
+```
+
+
+## Final GSEA figure Trges Biopsy
+```{r tregs biopsy, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#read the files for responders and non responders 
+
+tregs_responders <- read.table('/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/GSEA_final_results/tregs_biopsy/gsea_files/tregs_gsea_biopsy_responders.tsv',
+                               sep='\t',
+                               header = T)
+
+tregs_nonresponders <- read.table('/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/GSEA_final_results/tregs_biopsy/gsea_files/tregs_gsea_biopsy_non_responders.tsv',
+                                  sep='\t',
+                                  header = T)
+
+
+# merge the columns of pathways description and pathway GO term together 
+
+tregs_responders$Term <- paste(tregs_responders$Pathways, tregs_responders$GO)
+tregs_nonresponders$Term <- paste(tregs_nonresponders$Pathways, tregs_nonresponders$GO)
+
+# split the element of the columns by /
+tregs_responders$core_enrichment_v1 <- strsplit(tregs_responders$core_enrichment, "/")
+tregs_nonresponders$core_enrichment_v1 <- strsplit(tregs_nonresponders$core_enrichment, "/")
+
+# count the number of genes per row of the enrichment core and create a new column with the count
+for (i in 1:length(tregs_responders$core_enrichment_v1)) {
+  column <- length(tregs_responders$core_enrichment_v1[[i]])
+  tregs_responders[i, 'core_enrichment_v2'] <- column
+}
+
+for (i in 1:length(tregs_nonresponders$core_enrichment_v1)) {
+  column <- length(tregs_nonresponders$core_enrichment_v1[[i]])
+  tregs_nonresponders[i, 'core_enrichment_v2'] <- column
+}
+
+#create a new column called Overlap indicating the ratio of the enrichment genes/ setsize
+
+tregs_responders$Fraction <- tregs_responders$core_enrichment_v2/tregs_responders$setSize
+tregs_nonresponders$Fraction <- tregs_nonresponders$core_enrichment_v2/tregs_nonresponders$setSize
+
+
+#select only the relevant columns
+tregs_responders_subset <- tregs_responders %>% select('Term', 'Fraction', 'p.adjust')
+tregs_nonresponders_subset <- tregs_nonresponders %>% select('Term', 'Fraction', 'p.adjust')
+
+#transform the p adjusted value in -log
+tregs_responders_subset$log10 <- -log10(tregs_responders_subset$p.adjust)
+tregs_nonresponders_subset$log10 <- -log10(tregs_nonresponders_subset$p.adjust)
+
+pathway_list <- c('activation of immune response GO:0002253', 'adaptive immune response GO:0002250',
+                  'defense response to other organism GO:0098542', 'leukocyte activation GO:0045321',
+                  'cell recognition GO:0008037', 'cell surface receptor signaling pathway GO:0007166',
+                  'cell-cell adhesion GO:0098609', 'cellular response to stimulus GO:0051716',
+                  'cellular component organization GO:0016043', 'humoral immune response GO:0006959',
+                  'regulation of immune response GO:0050776', 'inflammatory response GO:0006954',
+                  'lymphocyte mediated immunity GO:0002449', 'extrinsic apoptotic signaling pathway GO:0097191',
+                  'regulation of cell activation GO:0050865', 'regulation of cell differentiation GO:0045595',
+                  'regulation of cell population proliferation GO:0042127', 'response to bacterium GO:0009617',
+                  'response to external biotic stimulus GO:0043207', 'response to organic substance GO:0010033',
+                  'macromolecule metabolic process GO:0043170', 'ribonucleoprotein complex biogenesis GO:0022613',
+                  'regulation of catalytic activity GO:0050790', 'oxidative phosphorylation GO:0006119',
+                  'amide metabolic process GO:0043603')
+
+
+tregs_nonresponders_subset$Term <- factor(tregs_nonresponders_subset$Term, levels = pathway_list)
+tregs_responders_subset$Term <- factor(tregs_responders_subset$Term, levels = pathway_list)
+
+Responders_Term <- unique(tregs_responders_subset$Term)
+Non_Responders_Term <- unique(tregs_nonresponders_subset$Term)
+
+# create the empty new tables
+
+tregs_responders_df <- data.frame(Term = rep(NA, times = length(Responders_Term)),
+                                  Log10 = rep(NA, times = length(Responders_Term)),
+                                  Fraction = rep(NA, times = length(Responders_Term)))
+
+tregs_nonresponders_df <- data.frame(Term = rep(NA, times = length(Non_Responders_Term)),
+                                     Log10 = rep(NA, times = length(Non_Responders_Term)),
+                                     Fraction = rep(NA, times = length(Non_Responders_Term)))
+
+
+for (i in 1:length(Responders_Term)) {
+  term <- as.character(Responders_Term[i])
+  subset_term <- tregs_responders_subset[tregs_responders_subset$Term == term, ]
+  log10_mean <- mean(subset_term$log10)
+  fraction_mean <- mean(subset_term$Fraction)
+  tregs_responders_df[i, c('Term', 'Log10', 'Fraction')] <- c(term, log10_mean, fraction_mean)
+}
+
+tregs_responders_df$Term <- factor(tregs_responders_df$Term, levels = pathway_list)
+
+for (i in 1:length(Non_Responders_Term)) {
+  term <- as.character(Non_Responders_Term[i])
+  subset_term <- tregs_nonresponders_subset[tregs_nonresponders_subset$Term == term, ]
+  log10_mean <- mean(subset_term$log10)
+  fraction_mean <- mean(subset_term$Fraction)
+  tregs_nonresponders_df[i, c('Term', 'Log10', 'Fraction')] <- c(term, log10_mean, fraction_mean)
+}
+
+tregs_nonresponders_df$Term <- factor(tregs_nonresponders_df$Term, levels = pathway_list)
+
+#create a new column for dividing pathways of R and NR
+tregs_responders_df$response <- 'Responders'
+tregs_nonresponders_df$response <- 'Non-Responders'
+tregs_nonresponders_df$Log10 <- as.numeric(tregs_nonresponders_df$Log10)
+tregs_nonresponders_df$Fraction <- as.numeric(tregs_nonresponders_df$Fraction)
+tregs_responders_df$Log10 <- as.numeric(tregs_responders_df$Log10)
+tregs_responders_df$Fraction <- as.numeric(tregs_responders_df$Fraction)
+
+
+#merge two data frames
+tregscytes_T0_NR_R_DE <- rbind(tregs_responders_df, tregs_nonresponders_df)
+
+p <- ggplot(data=tregscytes_T0_NR_R_DE, mapping = aes(x=response, y=Term, color=Log10, size=Fraction)) +
+  geom_point() +
+  scale_color_gradient(low='darkturquoise', high='orchid') + 
+  theme(text = element_text(size = 15)) + 
+  xlab('Response') + 
+  ylab('Pathways') + 
+  labs(color = '-log10(p)')
+
+```
+

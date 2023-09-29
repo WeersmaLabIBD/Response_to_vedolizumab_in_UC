@@ -1,0 +1,472 @@
+---
+title: "Differential Expression analysis and Pathway analysis on Vedo2 data"
+author: "Paola Pibiri"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+############################################################################################################################
+# Authors: Paola Pibiri
+# Name: Vedo2Project_DE_and_pathway_analysis.Rmd
+# Function: Perform the DE and pathway analysis on vedo2
+############################################################################################################################
+
+```
+
+
+```{r libraries, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#############################################
+# libraries                                 #
+#############################################
+
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+library(clusterProfiler)
+library(enrichplot)
+library(pathview)
+library(enrichR)
+library(dplyr) 
+library(tidyr) 
+
+```
+
+
+
+```{r functions, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#############################################
+# Functions                                 #
+#############################################
+
+
+sc_de_function <- function(output_dir, seurat_object, celltypes, celltype_column, condition_column, condition, comparison_column, comparison1, comparison2){
+  # run the function for each celltype
+  for (celltype in celltypes){
+    print(celltype)
+    #consider only the condition selected and the specific celltype
+    celltype_seurat <- seurat_object[ ,seurat_object@meta.data[[condition_column]] == condition & seurat_object@meta.data[[celltype_column]] == celltype]
+    print(celltype_seurat)
+    Idents(object = celltype_seurat) <- comparison_column
+    tryCatch({
+      # run the function for finding markers
+      de_markers <- FindMarkers(celltype_seurat, ident.1 = comparison1, ident.2 = comparison2, test.use = 'MAST', min.pct=0.1, assay='RNA', slot='data', features=NULL, logfc_threshold=0)
+      #filer for only significant genes 
+      de_markers <- filter(de_markers, de_markers$p_val_adj < 0.05)
+      #write the table with the results 
+      write.table(de_markers, paste0(output_dir, 'de_expression_', celltype, '_', condition_column, '_', condition, '_' , comparison1, '_vs_', comparison2, '.tsv'), quote = T, row.names = T, col.names = T, sep = '\t')
+    }, error=function(error_condition) {
+      print(paste("could not do analysis for", celltype, ':', error_condition))
+    })
+    rm(celltype_seurat)
+  }
+}
+
+
+# perform MAST as implemented in Seurat
+perform_seurat_mast <- function(seurat_object, identity_column, ident.1, ident.2, min.pct=0.1, assay='RNA', slot='data', features=NULL, logfc_threshold=0){
+  # set the identity for the Seurat object
+  Idents(seurat_object) <- identity_column
+  # set the assay
+  DefaultAssay(seurat_object) <- assay
+  # perform MAST
+  mast_result <- FindMarkers(seurat_object, ident.1 = ident.1, ident.2 = ident.2, test.use = 'MAST', assay='RNA', min.pct = min.pct, slot = slot, features = features, logfc.threshold = logfc_threshold)
+  return(mast_result)
+}
+
+# perform MAST as implemented in Seurat, for each cell type
+perform_seurat_mast_per_celltype <- function(seurat_object, identity_column, ident.1, ident.2, mast_output_loc, cell_type_column='predicted.cell_type.pred2', cell_types_to_consider=NULL, min.pct=0.1, assay='SCT', slot='data', features=NULL, logfc_threshold=0.25){
+  # check if the mast output loc exists
+  if(!dir.exists(mast_output_loc)){
+    # create the directory if not
+    dir.create(mast_output_loc, recursive = T)
+  }
+  # check the overlapping cell types
+  cell_types <- unique(seurat_object@meta.data[[cell_type_column]])
+  if(!is.null(cell_types_to_consider)){
+    cell_types <- intersect(cell_types, cell_types_to_consider)
+  }
+  # check each cell type
+  for(cell_type in cell_types){
+    # get a safe file name
+    cell_type_safe <- gsub(' |/', '_', cell_type)
+    cell_type_safe <- gsub('-', '_negative', cell_type_safe)
+    cell_type_safe <- gsub('\\+', '_positive', cell_type_safe)
+    cell_type_safe <- gsub('\\)', '', cell_type_safe)
+    cell_type_safe <- gsub('\\(', '', cell_type_safe)
+    # paste together the output location
+    #full_output_loc <- paste(mast_output_loc, cell_type_safe, '_', ident.1, '_vs_', ident.2, '.tsv', sep = '')
+    full_output_loc <- paste(mast_output_loc, cell_type_safe, '.tsv', sep = '')
+    # subset to the cell type
+    seurat_object_celltype <- seurat_object[, seurat_object@meta.data[[cell_type_column]] == cell_type]
+    # try to do the differential expression (might fail if too few cells)
+    tryCatch(
+      {
+        # perform the analysis
+        mast_result <- perform_seurat_mast(seurat_object_celltype, identity_column, ident.1, ident.2, min.pct, assay, slot = slot, features = features, logfc_threshold = logfc_threshold)
+        # add our only mtc if features were selected. Seurat does Bonferroni correction by multiplying the nominal P-value by the number of genes. when we select the genes to test, this is incorrect.
+        if (!is.null(features) & length(features) > 0) {
+          mast_result[['bonferroni']] <- p.adjust(mast_result[['p_val']], method = 'bonferroni')
+          mast_result[['BH']] <- p.adjust(mast_result[['p_val']], method = 'BH')
+        }
+        # write the result
+        write.table(mast_result, full_output_loc, sep = '\t', row.names = T, col.names = T)
+      },
+      error=function(cond) {
+        # print why we fail
+        print(paste('DE failed for', cell_type, ident.1, 'vs', ident.2, ':', cond))
+      }
+    )
+  }
+}
+
+# create the table which will have the log fold changes (and p values) of the MAST output of the selected genes
+create_lfc_table <- function(mast_output_loc, features){
+  # list all the files
+  files_in_dir <- list.files(mast_output_loc, pattern = '*.tsv')
+  # initialize the full table
+  lfc_table <- NULL
+  # check each file
+  for (output_file in files_in_dir) {
+    # read the output file
+    mast_file <- read.table(paste(mast_output_loc, output_file, sep = ''), sep = '\t', header = T, row.names = 1)
+    # add the genes as a column
+    mast_file[['gene']] <- rownames(mast_file)
+    # extract the cell type from the filename
+    celltype <- gsub('.tsv', '', output_file)
+    # add the celltype as a column
+    mast_file[['celltype']] <- celltype
+    # get the genes that we want, and that we have
+    common_genes <- intersect(features, rownames(mast_file))
+    # subset to only the genes that we are interested in
+    mast_file <- mast_file[common_genes, ]
+    # remove the rownames, as those won't be unique when pasting the cell type together
+    rownames(mast_file) <- NULL
+    # add to the big table
+    if (is.null(lfc_table)) {
+      lfc_table <- mast_file
+    }
+    else{
+      lfc_table <- rbind(lfc_table, mast_file)
+    }
+  }
+  return(lfc_table)
+}
+
+make_celltypes_safe <- function(cell_types){
+  # get a safe file name
+  cell_type_safes <- gsub(' |/', '_', cell_types)
+  cell_type_safes <- gsub('- ', '_negative', cell_type_safes)
+  cell_type_safes <- gsub('\\+', '_positive', cell_type_safes)
+  cell_type_safes <- gsub('\\)', '', cell_type_safes)
+  cell_type_safes <- gsub('\\(', '', cell_type_safes)
+  return(cell_type_safes)
+}
+
+
+do_cluster_profiler_kegg <- function(mast.output.loc, pathway.output.loc, log.fc.column='avg_log2FC',nPerm=10000, minGSSize=3, maxGSSize=800, pvalueCutoff=0.05, pAdjustMethod='BH'){
+  # set the organism
+  kegg.organism <- "hsa"
+  organism <- 'org.Hs.eg.db'
+  # backup the working directory
+  prev.wd <- getwd()
+  #iterate over all files in the directory of the condition
+  for (file in list.files(mast.output.loc,  full.names = TRUE)) {
+    #read the file
+    de.output = read.table(file, header = T, row.names = 1, sep = '\t', stringsAsFactors = F) 
+    #extract the name of the file
+    name_file <- strsplit(file, '/')[[1]][9]
+    # remove the de_expression and the .tsv
+    name_file <- gsub('de_expression_', '', name_file)
+    name_file <- gsub('.tsv', '', name_file)
+    # get the entrez IDs for the gene symbols
+    ids <- bitr(rownames(de.output), fromType = "SYMBOL", toType = "ENTREZID", OrgDb=organism)
+    # get the IDs which are not duplicated, and are not NA
+    #ids.not.duplicated <- ids[!is.na(duplicated(ids[['ENTREZID']])) & !duplicated(ids[['SYMBOL']]) & !duplicated(ids[['ENTREZID']]), ]
+    ids.not.duplicated <- ids[!is.na(ids[['ENTREZID']]), ] 
+    # subset the DE output to not have duplicates or NA
+    de.output <- de.output[rownames(de.output) %in% ids.not.duplicated[['SYMBOL']], ]
+    
+    # add the entrez IDs as a column
+    de.output[['entrezid']] <- ids[match(rownames(de.output), ids[['SYMBOL']]), 'ENTREZID']
+    
+    # order the table by the log fold change
+    de.output <- de.output[order(de.output[[log.fc.column]], decreasing = T), ]
+    
+    # grab the log FCs
+    log.fcs <- de.output[[log.fc.column]]
+    # and set the entrez IDs as names for a named vector
+    names(log.fcs) <- de.output[['entrezid']]
+    
+    set.seed(1234)
+    # run clusterprofiler
+    cc.result <- gseKEGG(geneList     = log.fcs,
+                         organism     = kegg.organism,
+                         nPerm        = nPerm,
+                         minGSSize    = minGSSize,
+                         maxGSSize    = maxGSSize,
+                         pvalueCutoff = pvalueCutoff,
+                         pAdjustMethod = pAdjustMethod,
+                         keyType       = "ncbi-geneid",
+                         seed = T)
+    
+    
+    
+    # extract the resulting table
+    cc.table <- cc.result@result
+    # check if there is a result
+    if(nrow(cc.table) > 0){
+      # create the folder if it does not exist
+      cc.table.folder<- paste(pathway.output.loc, 'table/', sep = '')
+      if(!dir.exists(cc.table.folder)){
+        dir.create(cc.table.folder, recursive = T)
+      }
+      # paste the output path together
+      cc.table.loc <- paste(pathway.output.loc, 'table/', name_file, '.tsv', sep = '')
+      # write the result
+      write.table(cc.table, cc.table.loc, sep = '\t', quote = F, row.names = F, col.names = T)
+      
+      # create the dotplot
+      cc.dotplot <- dotplot(cc.result, showCategory = 10, title = "Enriched Pathways" , split=".sign") + facet_grid(.~.sign)
+      # paste the output path together
+      cc.dotplot.folder <- paste(pathway.output.loc, 'dotplot/', sep = '')
+      if(!dir.exists(cc.dotplot.folder)){
+        dir.create(cc.dotplot.folder, recursive = T)
+      }
+      cc.dotplot.file <- paste(name_file, '.pdf', sep = '')
+      # save the dotplot
+      ggsave(filename = cc.dotplot.file, path = cc.dotplot.folder, plot = cc.dotplot, height = 15, width = 10)
+      
+      # get the similarity matrix
+      cc.simmatrix <- pairwise_termsim(cc.result)
+      # create the emmaplot
+      cc.emmaplot <- emapplot(cc.simmatrix)
+      # paste the output path together
+      cc.emmaplot.folder <- paste(pathway.output.loc, 'emmaplot/', sep = '')
+      if(!dir.exists(cc.emmaplot.folder)){
+        dir.create(cc.emmaplot.folder, recursive = T)
+      }
+      cc.emmaplot.file <- paste(name_file, '.pdf', sep = '')
+      # save the emmaplot
+      ggsave(filename = cc.emmaplot.file, path = cc.emmaplot.folder, plot = cc.emmaplot)
+      
+      # now we need to set the working directory for the pathview plots
+      pathview.plot.folder <- paste(pathway.output.loc, 'pathview/', name_file, '/', sep = '')
+      # check if the directory exists
+      if(!dir.exists(pathview.plot.folder)){
+        # create it if it does not
+        dir.create(pathview.plot.folder, recursive = T)
+      }
+      # set the working directory to be this directory
+      setwd(pathview.plot.folder)
+      # check each path id
+      for(path.id in unique(cc.table[['ID']])){
+        # for some reason pathwview may error
+        tryCatch({
+          pathview(gene.data=log.fcs, pathway.id = path.id, species = kegg.organism)
+        }, error=function(error_condition) {
+          print(paste("pathview failed for:", name_file, path.id, '->', error_condition))
+        })
+      }
+    }
+  }
+  # put back the working directory
+  setwd(prev.wd)
+}
+
+do_cluster_profiler_go <- function(mast.output.loc, pathway.output.loc, log.fc.column='avg_log2FC', ont= 'BP', keytype= 'SYMBOL', nPerm=10000, minGSSize=3, maxGSSize=800, pvalueCutoff=0.05, pAdjustMethod='BH'){
+  # set the organism
+  organism <- 'org.Hs.eg.db'
+  # backup the working directory
+  prev.wd <- getwd()
+  #iterate over all files in the directory of the condition
+  for (file in list.files(mast.output.loc,  full.names = TRUE)) {
+    #read the file
+    print(paste('reading file', file))
+    de.output = read.table(file, header = T, row.names = 1, sep = '\t', stringsAsFactors = F) 
+    #extract the name of the file
+    name_file <- strsplit(file, '/')[[1]][10]
+    # remove the de_expression and the .tsv
+    name_file <- gsub('de_expression_', '', name_file)
+    name_file <- gsub('.tsv', '', name_file)
+    # we want the log2 fold change 
+    original.genelist <- de.output[[log.fc.column]]
+    # name the vector
+    names(original.genelist) <- rownames(de.output)
+    # omit any NA values 
+    gene.list<-na.omit(original.genelist)
+    # sort the list in decreasing order (required for clusterProfiler)
+    gene.list = sort(gene.list, decreasing = TRUE)
+    #set a seed 
+    set.seed(1234)
+    # run clusterprofiler
+    cc.result <- gseGO(geneList=gene.list, 
+                       ont =ont, 
+                       keyType = keytype, 
+                       nPerm = nPerm, 
+                       minGSSize = minGSSize, 
+                       maxGSSize = maxGSSize, 
+                       pvalueCutoff = pvalueCutoff, 
+                       verbose = TRUE, 
+                       OrgDb = organism, 
+                       pAdjustMethod = pAdjustMethod,
+                       seed = T)
+    
+    # extract the resulting table
+    cc.table <- cc.result@result
+    # check if there is a result
+    if(nrow(cc.table) > 0){
+      # create the folder if it does not exist
+      cc.table.folder<- paste(pathway.output.loc, 'table/', sep = '')
+      if(!dir.exists(cc.table.folder)){
+        dir.create(cc.table.folder, recursive = T)
+      }
+      # paste the output path together
+      cc.table.loc <- paste(pathway.output.loc, 'table/', name_file, '.tsv', sep = '')
+      # write the result
+      write.table(cc.table, cc.table.loc, sep = '\t', quote = F, row.names = F, col.names = T)
+      
+      # create the dotplot
+      cc.dotplot <- dotplot(cc.result, showCategory = 10, title = "Enriched Pathways" , split=".sign") + facet_grid(.~.sign)
+      # paste the output path together
+      cc.dotplot.folder <- paste(pathway.output.loc, 'dotplot/', sep = '')
+      if(!dir.exists(cc.dotplot.folder)){
+        dir.create(cc.dotplot.folder, recursive = T)
+      }
+      cc.dotplot.file <- paste(name_file, '.pdf', sep = '')
+      # save the dotplot
+      ggsave(filename = cc.dotplot.file, path = cc.dotplot.folder, plot = cc.dotplot, height = 15, width = 10)
+      
+      # get the similarity matrix
+      cc.simmatrix <- pairwise_termsim(cc.result)
+      # create the emmaplot
+      cc.emmaplot <- emapplot(cc.simmatrix, showCategory = 5)
+      # paste the output path together
+      cc.emmaplot.folder <- paste(pathway.output.loc, 'emmaplot/', sep = '')
+      if(!dir.exists(cc.emmaplot.folder)){
+        dir.create(cc.emmaplot.folder, recursive = T)
+      }
+      cc.emmaplot.file <- paste(name_file, '.pdf', sep = '')
+      # save the emmaplot
+      ggsave(filename = cc.emmaplot.file, path = cc.emmaplot.folder, plot = cc.emmaplot)
+      
+    }
+  }
+}
+
+go_enrichment <- function(dir.out ,mast.output.loc, log.fc.column='avg_log2FC', prepend, append){
+  #iterate through files
+  for (file in list.files(mast.output.loc,  full.names = TRUE)) {
+    #read the file
+    de.output = read.table(file, header = T, row.names = 1, sep = '\t', stringsAsFactors = F) 
+    #extract the base name of the file
+    name.file <- gsub(prepend,'',basename(file))
+    name.file <- gsub('.tsv','', name.file)
+    #extract the celltype
+    celltype <- gsub(append, '', name.file)
+    #filter for only significant genes
+    de.output.filtered <- de.output[de.output[['p_val_adj']] < 0.05, ]
+    #check if the df is empty
+    if (nrow(de.output.filtered) > 0) {
+      #filter for positive lfc
+      de.output.positive <- de.output[de.output[[log.fc.column]] > 0, ]
+      #check the df is empty
+      if (nrow(de.output.positive) > 0) { 
+        print(paste('doing positive genes for', celltype))
+        #take the names of the positive genes
+        positive.genes <- rownames(de.output.positive)
+        print(paste('writing table', paste0(dir.out, name.file, '_', 'positive_genes.tsv')))
+        #write down the input table that will be used for pathway analysis
+        write.table(de.output.positive, paste0(dir.out, name.file, '_', 'positive_genes.tsv'), sep = '\t', col.names = T, row.names = T)
+        #run pathway analysis
+        positive.enriched <- enrichr(positive.genes, databases = "GO_Biological_Process_2018")$GO_Biological_Process
+        #save the results deriving from pathway analysis
+        write.table(positive.enriched, paste0(dir.out,name.file, '_', 'positive_genes_pathways.tsv'), sep = '\t', col.names = T, row.names = F) 
+        #print error message if the positive df is empty
+      } else {
+        print(paste0('no significant positive genes found for ', celltype))
+      }
+      #filter for negative lfc
+      de.output.negative <- de.output[de.output[[log.fc.column]] < 0, ]
+      #check if the df is empty
+      if (nrow(de.output.negative) > 0) { 
+        print(paste('doing negative genes for', celltype))
+        #extract the gene names
+        negative.genes <- rownames(de.output.negative)
+        #write down the input results for the pathway analysis
+        write.table(de.output.negative, paste0(dir.out, name.file, '_', 'negative_genes.tsv'), sep = '\t', col.names = T, row.names = T)
+        #perform the pathway analysis
+        negative.enriched <- enrichr(negative.genes, databases = "GO_Biological_Process_2018")$GO_Biological_Process #try Reactome_2016$Reactome_2016
+        #write down the results of the pathway analysis
+        write.table(negative.enriched, paste0(dir.out, name.file, '_', 'negative_genes_pathways.tsv'), sep = '\t', col.names = T, row.names = F)
+      } else {
+        #print error message if the negative df is empty
+        print(paste0('no significant negative genes found for ', celltype))
+      }
+      
+    } else {
+      #print error message if there are not significant genes 
+      print(paste0('no significant genes found for ', celltype))
+    }
+  }
+}
+
+```
+
+
+## Run differential expression analysis for each condition and for each celltype
+```{r DE, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#############################################
+# Main Code                                 #
+#############################################
+
+
+#Run differential expression analysis for the different conditions
+
+out.dir <- '/Users/paolapibiri/Desktop/Vedo2/Vedo2_biopsy_batch1_2/DE_expression/'
+
+#as general for all cells
+R <- sc_de_function(out.dir, vedo2, 'celltype_final', 'PGA._resp',  'yes', 'timepoint', 'T4', 'T0')
+NR <- sc_de_function(out.dir, vedo2, 'celltype_final', 'PGA._resp',  'no', 'timepoint', 'T4', 'T0')
+R <- sc_de_function(out.dir, vedo2, 'celltype_final', 'timepoint',  'T0', 'PGA._resp', 'no', 'yes')
+R <- sc_de_function(out.dir, vedo2, 'celltype_final', 'PGA._resp',  'T4', 'PGA._resp', 'no', 'yes')
+
+```
+
+
+## Perform the overrepresentation and the GSEA pathway analysis
+```{r pathway analysis, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# define the input directory for the DE files
+dir.input<-"/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/differential_expression/batch12/input/"
+
+
+# Perform the GSEA analyses
+do_cluster_profiler(mast.output.loc = dir.input, pathway.output.loc = '/Users/paolapibiri/Desktop/Vedo2/Vedo2_biopsy_batch1_2/pathways/cluster_profiler/kegg_pathway_analysis/')
+
+do_cluster_profiler_go(mast.output.loc = dir.input, 
+                       pathway.output.loc = '/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/go_pathway_analysis/')
+
+# Perform the Overrepresentation analyses
+go_enrichment(dir.input,
+              '/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/over_pathway_analysis/',
+              prepend = 'de_expression_', append = '_PGA._resp_yes_T4_vs_T0')  
+
+
+```
+
+
+
+
+```
+
+
+
+

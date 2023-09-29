@@ -1,0 +1,285 @@
+---
+title: "Nichenet Pairwise analysis"
+author: "Paola Pibiri"
+output: html_document
+---
+
+```{r header, include=FALSE}
+############################################################################################################################
+# Authors: Paola Pibiri
+# Name: Vedo2Project_Nichenet_analysis_pairwise.Rmd
+# Function: check the cell-cell communications between 1 receiver cell and multiple sender cells 
+############################################################################################################################
+```
+
+
+```{r libraries, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+####################
+# libraries        #
+####################
+
+library(dplyr)
+library(nichenetr)
+library(Seurat)
+library(tidyverse)
+
+```
+
+
+
+```{r main parameters, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+####################
+# Main Code        #
+####################
+
+# read the seurat object
+vedo2 <- readRDS('/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/seurat_preprocess_samples/objects/vedo2_remerged_resct_20230215.rds')
+# define the subset which to work with: vedo2 at t0
+object.sub <- vedo2[ , vedo2@meta.data$timepoint == 'T0']
+
+# create the new celltypes
+object.sub@meta.data$celltype_final.v1 <- object.sub@meta.data$celltype_final
+object.sub@meta.data[object.sub@meta.data$celltype_final.v1 %in% c('DC1', 'DC2'), 'celltype_final.v1']  <- 'DCs'
+
+
+#list of cells you want to use 
+list3_vedo2 <- c('Inflammatory Monocytes', 'NKs', 'Tregs', 'Inflammatory Fibroblasts', 'Post-capillary Venules', 'DCs', 'IgG', 'M cells', 'CD8+ IL17+')
+
+
+#Read in NicheNet’s ligand-target prior model, ligand-receptor network and weighted integrated networks
+ligand_target_matrix = readRDS(url("https://zenodo.org/record/3260758/files/ligand_target_matrix.rds"))
+#
+lr_network = readRDS(url("https://zenodo.org/record/3260758/files/lr_network.rds"))
+#
+weighted_networks = readRDS(url("https://zenodo.org/record/3260758/files/weighted_networks.rds"))
+weighted_networks_lr = weighted_networks$lr_sig %>% inner_join(lr_network %>% distinct(from,to), by = c("from","to"))
+```
+
+## Perform the Nichenet analysis Pairwise
+```{r foor loop executing the analysis 1receiver 1sender, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#define the list of cells to perform the analysis
+ist3_vedo2 <- c('M cells', 'ILCs', 'Inflammatory Monocytes', 'NKs', 'Tregs', 'Inflammatory Fibroblasts', 'Post-capillary Venules', 'DCs', 'IgG',  'CD8+ IL17+')
+
+#identify all the possible combinations of interacting cells 
+all.combinations <- unique(expand.grid(list3_vedo2, list3_vedo2))
+
+#define the colnames in the created combinations dataframe
+colnames(all.combinations) <- c('celltype1', 'celltype2')
+
+#create a union between the teo names of all possible combinations to define the output folder 
+all.combinations$folder.out <- paste0(all.combinations$celltype1, '_', all.combinations$celltype2)
+
+#make the names of the folder safe
+all.combinations$folder.out <- gsub('\\+', 'pos', all.combinations$folder.out)
+all.combinations$folder.out <- gsub('- ', 'neg_', all.combinations$folder.out)
+all.combinations$folder.out <- gsub(' |-', '_', all.combinations$folder.out)
+
+#define the main folder output
+folder.main <- '/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/NicheNetPairwise/new_results/'
+
+#run the analysis
+for (i in 1:nrow(all.combinations)) {
+  tryCatch(
+    {
+      receiver = all.combinations[i, 'celltype1']
+      print(receiver)
+      Idents(object = object.sub) <- 'celltype_final.v1'
+      expressed_genes_receiver = get_expressed_genes(receiver, object.sub, pct = 0.10)
+      background_expressed_genes = expressed_genes_receiver %>% .[. %in% rownames(ligand_target_matrix)]
+      
+      
+      
+      ## sender
+      sender_celltypes = all.combinations[i, 'celltype2']
+      Idents(object = object.sub) <- 'celltype_final.v1'
+      expressed_genes_sender = get_expressed_genes(sender_celltypes, object.sub, pct = 0.10)
+      
+      print(paste0('doing ',receiver, ' and ', sender_celltypes))
+      
+      # Define a gene set of interest: these are the genes in the “receiver/target” cell population that are potentially 
+      #affected by ligands expressed by interacting cells (e.g. genes differentially expressed upon cell-cell interaction)
+      #
+      condition_oi = "no"
+      condition_reference = "yes"
+      
+      seurat_obj_receiver <- object.sub[ ,object.sub@meta.data$celltype_final.v1 == receiver]
+      seurat_obj_receiver = SetIdent(seurat_obj_receiver, value = seurat_obj_receiver[["PGA._resp"]])
+      #
+      
+      DE_table_receiver = FindMarkers(object = seurat_obj_receiver, ident.1 = condition_oi, ident.2 = condition_reference, min.pct = 0.10) %>% rownames_to_column("gene")
+      
+      geneset_oi = DE_table_receiver %>% filter(p_val_adj <= 0.05 & abs(avg_log2FC) >= 0.25) %>% pull(gene)
+      
+      geneset_oi = geneset_oi %>% .[. %in% rownames(ligand_target_matrix)]
+      
+      #Define a set of potential ligands: these are ligands that are expressed by the “sender/niche”
+      #cell population and bind a (putative) receptor expressed by the “receiver/target” population
+      
+      ligands = lr_network %>% pull(from) %>% unique()
+      receptors = lr_network %>% pull(to) %>% unique()
+      #
+      expressed_ligands = intersect(ligands,expressed_genes_sender)
+      expressed_receptors = intersect(receptors,expressed_genes_receiver)
+      #
+      potential_ligands = lr_network %>% filter(from %in% expressed_ligands & to %in% expressed_receptors) %>% pull(from) %>% unique()
+      
+      #Perform NicheNet ligand activity analysis: rank the potential ligands based on the presence
+      #of their target genes in the gene set of interest (compared to the background set of genes)
+      
+      ligand_activities = predict_ligand_activities(geneset = geneset_oi, background_expressed_genes = background_expressed_genes, ligand_target_matrix = ligand_target_matrix, potential_ligands = potential_ligands)
+      #
+      ligand_activities = ligand_activities %>% arrange(-pearson) %>% mutate(rank = rank(desc(pearson)))
+      #
+      best_upstream_ligands = ligand_activities %>% top_n(20, pearson) %>% arrange(-pearson) %>% pull(test_ligand) %>% unique()
+      #
+      dotplot <- DotPlot(object.sub, features = best_upstream_ligands %>% rev(), cols = "RdYlBu") + RotatedAxis()
+      
+      
+      #create the directory for the couple of celltypes
+      dir.create(file.path(folder.main, all.combinations[i, 'folder.out']))
+      
+      ggsave(paste0(folder.main, all.combinations[i, 'folder.out'], '/dotplot.pdf'), width= 25, height = 15)
+      
+      print(paste0('saved dotplot for ', receiver, ' and ', sender_celltypes))
+      
+      
+      #Infer receptors and top-predicted target genes of ligands that are top-ranked in the ligand activity analysis
+      active_ligand_target_links_df = best_upstream_ligands %>% lapply(get_weighted_ligand_target_links,geneset = geneset_oi, ligand_target_matrix = ligand_target_matrix, n = 200) %>% bind_rows() %>% drop_na()
+      
+      #
+      active_ligand_target_links = prepare_ligand_target_visualization(ligand_target_df = active_ligand_target_links_df, ligand_target_matrix = ligand_target_matrix, cutoff = 0.33)
+      
+      order_ligands = intersect(best_upstream_ligands, colnames(active_ligand_target_links)) %>% rev() %>% make.names()
+      order_targets = active_ligand_target_links_df$target %>% unique() %>% intersect(rownames(active_ligand_target_links)) %>% make.names()
+      rownames(active_ligand_target_links) = rownames(active_ligand_target_links) %>% make.names() # make.names() for heatmap visualization of genes like H2-T23
+      colnames(active_ligand_target_links) = colnames(active_ligand_target_links) %>% make.names() # make.names() for heatmap visualization of genes like H2-T23
+      
+      print(active_ligand_target_links)
+      
+      vis_ligand_target = active_ligand_target_links[order_targets,order_ligands] %>% t()
+      
+      
+      p_ligand_target_network = vis_ligand_target %>% make_heatmap_ggplot("Prioritized ligands","Predicted target genes", color = "purple",legend_position = "top", x_axis_position = "top",legend_title = "Regulatory potential")  + theme(axis.text.x = element_text(face = "italic")) + scale_fill_gradient2(low = "whitesmoke",  high = "purple", breaks = c(0,0.0045,0.0090))
+      
+      ggsave(paste0(folder.main, all.combinations[i, 'folder.out'],  '/p_ligand_target_network.pdf'), width= 10, height = 10)
+      
+      print(paste0('saved p_ligand_target_network for ', receiver, ' and ', sender_celltypes))
+      
+      #receptors
+      
+      lr_network_top = lr_network %>% filter(from %in% best_upstream_ligands & to %in% expressed_receptors) %>% distinct(from,to)
+      best_upstream_receptors = lr_network_top %>% pull(to) %>% unique()
+      
+      lr_network_top_df_large = weighted_networks_lr %>% filter(from %in% best_upstream_ligands & to %in% best_upstream_receptors)
+      
+      lr_network_top_df = lr_network_top_df_large %>% spread("from","weight",fill = 0)
+      lr_network_top_matrix = lr_network_top_df %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df$to)
+      
+      dist_receptors = dist(lr_network_top_matrix, method = "binary")
+      hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+      order_receptors = hclust_receptors$labels[hclust_receptors$order]
+      
+      dist_ligands = dist(lr_network_top_matrix %>% t(), method = "binary")
+      hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+      order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+      
+      order_receptors = order_receptors %>% intersect(rownames(lr_network_top_matrix))
+      order_ligands_receptor = order_ligands_receptor %>% intersect(colnames(lr_network_top_matrix))
+      
+      vis_ligand_receptor_network = lr_network_top_matrix[order_receptors, order_ligands_receptor]
+      rownames(vis_ligand_receptor_network) = order_receptors %>% make.names()
+      colnames(vis_ligand_receptor_network) = order_ligands_receptor %>% make.names()
+      
+      
+      #
+      p_ligand_receptor_network = vis_ligand_receptor_network %>% t() %>% make_heatmap_ggplot("Ligands","Receptors", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential")
+      
+      ggsave(paste0(folder.main, all.combinations[i, 'folder.out'],  '/p_ligand_receptor_network.pdf'), width= 25, height = 15)
+      
+      print(paste0('saved p_ligand_receptor_network for ', receiver, ' and ', sender_celltypes))
+      
+      
+      ######## check for only the bona fide connection of ligand and receptor
+      
+      lr_network_strict = lr_network %>% filter(database != "ppi_prediction_go" & database != "ppi_prediction")
+      ligands_bona_fide = lr_network_strict %>% pull(from) %>% unique()
+      receptors_bona_fide = lr_network_strict %>% pull(to) %>% unique()
+      
+      lr_network_top_df_large_strict = lr_network_top_df_large %>% distinct(from,to) %>% inner_join(lr_network_strict, by = c("from","to")) %>% distinct(from,to)
+      lr_network_top_df_large_strict = lr_network_top_df_large_strict %>% inner_join(lr_network_top_df_large, by = c("from","to"))
+      
+      lr_network_top_df_strict = lr_network_top_df_large_strict %>% spread("from","weight",fill = 0)
+      lr_network_top_matrix_strict = lr_network_top_df_strict %>% select(-to) %>% as.matrix() %>% magrittr::set_rownames(lr_network_top_df_strict$to)
+      
+      dist_receptors = dist(lr_network_top_matrix_strict, method = "binary")
+      hclust_receptors = hclust(dist_receptors, method = "ward.D2")
+      order_receptors = hclust_receptors$labels[hclust_receptors$order]
+      
+      dist_ligands = dist(lr_network_top_matrix_strict %>% t(), method = "binary")
+      hclust_ligands = hclust(dist_ligands, method = "ward.D2")
+      order_ligands_receptor = hclust_ligands$labels[hclust_ligands$order]
+      
+      order_receptors = order_receptors %>% intersect(rownames(lr_network_top_matrix_strict))
+      order_ligands_receptor = order_ligands_receptor %>% intersect(colnames(lr_network_top_matrix_strict))
+      
+      vis_ligand_receptor_network_strict = lr_network_top_matrix_strict[order_receptors, order_ligands_receptor]
+      rownames(vis_ligand_receptor_network_strict) = order_receptors %>% make.names()
+      colnames(vis_ligand_receptor_network_strict) = order_ligands_receptor %>% make.names()
+      
+      
+      
+      
+      
+      
+      p_ligand_receptor_network_strict = vis_ligand_receptor_network_strict %>% t() %>% make_heatmap_ggplot("Ligands","Receptors", color = "mediumvioletred", x_axis_position = "top",legend_title = "Prior interaction potential\n(bona fide)")
+      
+      ggsave(paste0(folder.main, all.combinations[i, 'folder.out'],  '/p_ligand_receptor_network_strict.pdf'), width= 5, height = 5)
+      
+      print(paste0('saved p_ligand_receptor_network_strict for ', receiver, ' and ', sender_celltypes))
+      
+      
+      #Idents(object = vedo2_t0) <- receiver
+      DE_table_all = Idents(object.sub) %>% levels() %>% intersect(sender_celltypes) %>% lapply(get_lfc_celltype, seurat_obj = object.sub, condition_colname = "PGA._resp", condition_oi = condition_oi, condition_reference = condition_reference, expression_pct = 0.10, celltype_col = NULL) %>% reduce(full_join)
+      DE_table_all[is.na(DE_table_all)] = 0
+      
+      ligand_activities_de = ligand_activities %>% select(test_ligand, pearson) %>% rename(ligand = test_ligand) %>% left_join(DE_table_all %>% rename(ligand = gene))
+      ligand_activities_de[is.na(ligand_activities_de)] = 0
+      
+      # make LFC heatmap
+      lfc_matrix = ligand_activities_de  %>% select(-ligand, -pearson) %>% as.matrix() %>% magrittr::set_rownames(ligand_activities_de$ligand)
+      rownames(lfc_matrix) = rownames(lfc_matrix) %>% make.names()
+      
+      order_ligands = order_ligands[order_ligands %in% rownames(lfc_matrix)]
+      vis_ligand_lfc = as.matrix(lfc_matrix[order_ligands,])
+      rownames(vis_ligand_lfc) = rownames(vis_ligand_lfc) %>% make.names()
+      
+      
+      colnames(vis_ligand_lfc) = lfc_matrix %>% colnames() #%>% make.names()
+      colnames(vis_ligand_lfc) <- gsub('\\+', 'pos', colnames(vis_ligand_lfc))
+      colnames(vis_ligand_lfc) <- gsub('- ', 'neg_', colnames(vis_ligand_lfc))
+      colnames(vis_ligand_lfc) <- gsub(' |-', '_', colnames(vis_ligand_lfc))
+      
+      p_ligand_lfc = vis_ligand_lfc %>% make_threecolor_heatmap_ggplot("Prioritized ligands","LFC in Sender", low_color = "midnightblue",mid_color = "white", mid = 0, high_color = "red",legend_position = "top", x_axis_position = "top", legend_title = "LFC") + theme(axis.text.y = element_text(face = "italic"))
+      
+      
+      
+      ggsave(paste0(folder.main, all.combinations[i, 'folder.out'],  '/p_ligand_lfc.pdf'), width= 10, height = 10)
+      
+      print(paste0('saved p_ligand_lfc for ', receiver, ' and ', sender_celltypes))
+      
+    },
+    error=function(cond) {
+      message(paste0("There is an issue with this celltype:",  receiver, ' and ', sender_celltypes))
+      message("Here's the original error message:")
+      message(cond)
+    }
+  )
+}
+
+
+
+```

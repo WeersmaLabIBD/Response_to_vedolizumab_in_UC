@@ -1,0 +1,1037 @@
+---
+title: "Preprocessing and Celltype annotation process for Biopsy"
+author: "Paola Pibiri"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+############################################################################################################################
+# Authors: Paola Pibiri
+# Name: Vedo2Project_preprocessing_celltyping_and_input_cell_abundances_biopsy.Rmd
+# Function: perform all the preprocessing steps, celltype annotation manual and automatic till the input for cell abundances analysis
+############################################################################################################################
+
+```
+
+```{r libraries, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+####################
+# libraries        #
+####################
+## R Markdown
+
+library(cowplot)
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+library("RColorBrewer")
+library('UCell')
+```
+
+```{r functions, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+####################
+# Functions        #
+####################
+
+normalize_and_cluster_sct_method_1 <- function(seurat_object, resolution=1.2, dims=1:30, k.param=20){
+  # remove existing SCT normalization if present
+  try({
+    seurat_object@assays$SCT <- NULL
+  })
+  # start normalizing
+  #seurat_object@active.assay <- 'RNA'
+  #seurat_object <- FindVariableFeatures(seurat_object, assay = 'RNA')
+  seurat_object <- SCTransform(seurat_object)
+  # run PCA
+  seurat_object <- RunPCA(seurat_object, verbose = TRUE)
+  # calculate nearest neighbours
+  seurat_object <- FindNeighbors(seurat_object, dims = dims, verbose = TRUE)
+  # use same seed every time
+  set.seed(0)
+  # do clustering using knn
+  seurat_object <- FindClusters(seurat_object, resolution = resolution, verbose = TRUE)
+  # do 2d dimensional reduction
+  seurat_object <- RunUMAP(seurat_object, dims = 1:30, verbose = TRUE, return.model = TRUE) # Why return.model? using other function
+  # return the result
+  return(seurat_object)
+}
+
+# normalize, cluster and UMAP with the SCT data (for PSC/query data)
+normalize_and_cluster_sct_method_2 <- function(seurat_object, resolution=1.2, dims=1:30, k.param=20){
+  # remove existing SCT normalization if present
+  try({
+    seurat_object@assays$SCT <- NULL
+  })
+  # start normalizing
+  seurat_object <- SCTransform(seurat_object)
+  # run PCA
+  seurat_object <- RunPCA(seurat_object, verbose = TRUE)
+  # calculate nearest neighbours
+  seurat_object <- FindNeighbors(seurat_object, dims = dims, verbose = TRUE)
+  # use same seed every time
+  set.seed(0)
+  # do clustering using knn
+  seurat_object <- FindClusters(seurat_object, resolution = resolution, verbose = TRUE)
+  # do 2d dimensional reduction
+  seurat_object <- RunUMAP(seurat_object, dims = 1:30, verbose = TRUE)
+  # return the result
+  return(seurat_object)
+}
+
+
+# find transfer anchors between the reference data and the query data, and map the query data to the reference data
+azimuth_mapping <- function(seurat_object, reference){
+  # find transfer anchors between the reference data and query data
+  anchors <- FindTransferAnchors(
+    reference = reference,
+    query = seurat_object,
+    normalization.method = "SCT",  
+    reference.reduction = "pca",
+    dims = 1:30,
+    recompute.residuals = FALSE
+  )
+  # map the query data to the reference data
+  seurat_object <- MapQuery(
+    anchorset = anchors,
+    query = seurat_object,
+    reference = reference,
+    refdata = list(
+      cell_type.pred= "Cluster"
+    ),
+    reference.reduction = "pca",
+    reduction.model = "umap"  
+  )
+  # return the result
+  return(seurat_object)
+}
+
+#divide in the columns 
+add_data_from_rownames <- function(table_w_conditions, condition_column='condition', split_char='_', column_names=NULL){
+  # get the data to split
+  data_to_split <- table_w_conditions[[condition_column]]
+  # create an emtpy dataframe
+  metadata_dataframe <- NULL
+  # check each rowname
+  for(i in 1 : length(data_to_split)){
+    # get the value
+    value <- data_to_split[i]
+    # split the data
+    split_data <- strsplit(value, split_char)
+    # initialize the dataframe
+    if(is.null(metadata_dataframe)){
+      metadata_dataframe <- data.frame(matrix(, nrow=length(data_to_split), ncol = length(split_data[[1]])))
+    }
+    # add this row
+    metadata_dataframe[i, ] <- split_data[[1]]
+  }
+  # add the column names if requested
+  if(!is.null(column_names)){
+    colnames(metadata_dataframe) <- column_names
+  }
+  # add to the original data
+  table_w_conditions <- cbind(table_w_conditions, metadata_dataframe)
+  return(table_w_conditions)
+}
+
+plot_ncount_vs_mitopct <- function(seurat_object_metadata){
+  # totally stolen from Harm
+  p <- ggplot(seurat_object_metadata, aes(nCount_RNA, percent.mt)) + geom_hex(bins=100) +
+    scale_fill_distiller(palette = "Spectral", name="Cell frequencies",
+                         limits = c(0,100), oob = scales::squish) +
+    ylab("Fraction mtDNA-encoded genes") + xlab("Number of UMIs") +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+          panel.background = element_blank(), axis.line = element_line(colour = "grey"),
+          axis.text=element_text(size=12), axis.title=element_text(size=18))
+  return(p)
+}
+
+```
+
+
+## Filtering and subsetting in ileum and colonic
+```{r filtering and subsetting, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+####################
+# Main Code        #
+####################
+
+outdir <- '/data/p307890/Vedo2/batch_2/celltyping/'
+
+##start with v2 (object without the 5 flagged lanes), localized in peregrine cluster
+#normalization of the whole object was already performed with SCTransform and also clusters were defined
+
+#v1 <- readRDS("/data/p307890/Vedo2/batch_2/celltyping/objects/vedo2_biop_merged_v1_sct_clus.rds")
+v2 <- readRDS(paste0(outdir, 'objects/vedo2_biop_merged_v2_sct_clus.rds'))
+
+
+#Remove cells with mt > 70% in the total object
+v2 <- v2[, v2@meta.data[['percent.mt']] < 70]
+
+#subset th original object into colonic and ileum and save the objects
+v2_ileum <- v2[, v2@meta.data[['location']] == 'ileum']
+saveRDS(v2_ileum, paste0(outdir, 'new_results/objects/v2_ileum.rds'))
+#
+v2 <- v2[, v2@meta.data[['location']] != 'ileum']
+saveRDS(v2, paste0(outdir, 'new_results/objects/v2_no_ileum.rds'))
+
+```
+
+## Preprocessing
+```{r preprocessing, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#analysis of the colonic biopsy
+#set the normalized data
+DefaultAssay(v2)<-"SCT" 
+#set the seed 
+set.seed(0)
+#run PSC analysis
+v2<- RunPCA(v2)
+#run UMAP with the first 30 resolutions
+v2 <- RunUMAP(v2, dims = 1:30)
+#run find neighbors 
+v2<-FindNeighbors(v2, dims = 1:30)
+#cluster
+v2<-FindClusters(v2, resolution = 1.2)
+#create the plot
+v2_plot <- DimPlot(v2, group.by = "seurat_clusters", label = T, label.box = T, pt.size = 0.5, repel = T) + NoLegend()
+
+#save the plot
+ggsave("v2_clusters.pdf", width = 10, height = 8, path = paste0(outdir, 'new_results/plots'))
+#save the object preprocessed
+saveRDS(v2, paste0(outdir, 'new_results/objects/v2_with_ileum_clusters.rds'))
+
+```
+
+## Check of specific markers for epithelial, immune and stromal compartments
+```{r check markers per compartment, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+
+outdir <- "/data/p307890/Vedo2/batch_2/celltyping/new_results/"
+outdir_plot <- paste0(outdir, "/plots/")
+outdir_object <- paste0(outdir, "/objects/")
+
+#########################
+#  Epithelial Markers   #
+#########################
+
+#check the expression of the main marker for epithelial cells
+#chosen EPCAM > 3
+feature_epi_epcam <- FeaturePlot(v2, features=c('EPCAM'))
+
+# put the average expression per cluster into a dataframe
+avg_exp_epcam <- AverageExpression(v2, features = "EPCAM", assays = "RNA")
+avg_exp_epcam_table <- data.frame(cluster=colnames(avg_exp_epcam[['RNA']]), expression=as.vector(unlist(avg_exp_epcam[['RNA']])))
+#
+#create a column in the seurat object that is going to define epcam positive and negative cells and try different treshold 
+#to define the most similar to the feature plot
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_epcam_table[avg_exp_epcam_table[['expression']] > 4, 'cluster'], 'epcam_positive_4'] <- T
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_epcam_table[avg_exp_epcam_table[['expression']] <= 4, 'cluster'], 'epcam_positive_4'] <- F
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_epcam_table[avg_exp_epcam_table[['expression']] > 2, 'cluster'], 'epcam_positive_2'] <- T
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_epcam_table[avg_exp_epcam_table[['expression']] <= 2, 'cluster'], 'epcam_positive_2'] <- F
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_epcam_table[avg_exp_epcam_table[['expression']] > 3, 'cluster'], 'epcam_positive_3'] <- T
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_epcam_table[avg_exp_epcam_table[['expression']] <= 3, 'cluster'], 'epcam_positive_3'] <- F
+
+#create some dimplots in which we define in red the positive epcam cells for the diff thresholds 
+epi_epcam_4 <- DimPlot(v2, group.by = 'epcam_positive_4') + scale_color_manual(values=c('gray', 'red'))
+epi_epcam_2 <- DimPlot(v2, group.by = 'epcam_positive_2') + scale_color_manual(values=c('gray', 'red'))
+epi_epcam_3 <- DimPlot(v2, group.by = 'epcam_positive_3') + scale_color_manual(values=c('gray', 'red'))
+
+#create a grid picture showing the feature plots and the plots with the diff thresholds 
+plot_grid(v2_plot, feature_epi_epcam, epi_epcam_2, epi_epcam_3, epi_epcam_4, nrow = 2, ncol = 3)
+#save the picture 
+ggsave("epi_epcam.pdf", width = 10, height = 8, path = outdir_plot)
+
+
+
+#########################
+#  Stromal Markers      #
+#########################
+
+#check the main markers for stromal cells
+#fibroblasts --> chosen THY1 > 0.3
+feature_stro_thy1 <- FeaturePlot(v2, features=c('THY1'))
+#glia --> chosen SOX10 > 2
+feature_stro_sox10 <- FeaturePlot(v2, features=c('SOX10'))
+#endothelials --> chosen SOX10 > 1
+feature_stro_madcam1 <- FeaturePlot(v2, features=c('MADCAM1'))
+
+
+### Check of fibroblasts THY1
+#put the avarage expression per cluster in a dataframe
+avg_exp_thy1 <- AverageExpression(v2, features = "THY1", assays = "RNA")
+avg_exp_thy1_table <- data.frame(cluster=colnames(avg_exp_thy1[['RNA']]), expression=as.vector(unlist(avg_exp_thy1[['RNA']])))
+
+#create some new columns to define thy1 positive cells based on different thresholds
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_thy1_table[avg_exp_thy1_table[['expression']] > 0.4, 'cluster'], 'thy1_positive_0.4'] <- T
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_thy1_table[avg_exp_thy1_table[['expression']] <= 0.4, 'cluster'], 'thy1_positive_0.4'] <- F
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_thy1_table[avg_exp_thy1_table[['expression']] > 1, 'cluster'], 'thy1_positive_1'] <- T
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_thy1_table[avg_exp_thy1_table[['expression']] <= 1, 'cluster'], 'thy1_positive_1'] <- F
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_thy1_table[avg_exp_thy1_table[['expression']] > 0.3, 'cluster'], 'thy1_positive_0.3'] <- T
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_thy1_table[avg_exp_thy1_table[['expression']] <= 0.3, 'cluster'], 'thy1_positive_0.3'] <- F
+
+#create tables of the diff thresholds
+stro_thy1_0.4 <- DimPlot(v2, group.by = 'thy1_positive_0.4') + scale_color_manual(values=c('gray', 'red'))
+stro_thy1_1 <- DimPlot(v2, group.by = 'thy1_positive_1') + scale_color_manual(values=c('gray', 'red'))
+stro_thy1_0.3 <- DimPlot(v2, group.by = 'thy1_positive_0.3') + scale_color_manual(values=c('gray', 'red'))
+
+#create a grid with the original featuere plot and the plots having the diff theresholds
+plot_grid(v2_plot, feature_stro_thy1, stro_thy1_0.4, stro_thy1_0.3, stro_thy1_1)
+#save the picture
+ggsave("stro_thy1.pdf", width = 10, height = 8, path = outdir_plot)
+
+
+
+####################################
+#####Check the glia SOX10
+#put in a dataframe the avarage expression per cluster of the marker
+avg_exp_sox10 <- AverageExpression(v2, features = "SOX10", assays = "RNA")
+avg_exp_sox10_table <- data.frame(cluster=colnames(avg_exp_sox10[['RNA']]), expression=as.vector(unlist(avg_exp_sox10[['RNA']])))
+
+#create some new columns to define sox10 positive cells based on different thresholds
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_sox10_table[avg_exp_sox10_table[['expression']] > 2, 'cluster'], 'sox10_positive_2'] <- T
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_sox10_table[avg_exp_sox10_table[['expression']] <= 2, 'cluster'], 'sox10_positive_2'] <- F
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_sox10_table[avg_exp_sox10_table[['expression']] > 2.5, 'cluster'], 'sox10_positive_2.5'] <- T
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_sox10_table[avg_exp_sox10_table[['expression']] <= 2.5, 'cluster'], 'sox10_positive_2.5'] <- F
+
+#create tables of the diff thresholds
+stro_sox10_2 <- DimPlot(v2, group.by = 'sox10_positive_2') + scale_color_manual(values=c('gray', 'red'))
+stro_sox10_2.5 <- DimPlot(v2, group.by = 'sox10_positive_2.5') + scale_color_manual(values=c('gray', 'red'))
+
+#create a grid with the original featuere plot and the plots having the diff thresholds
+plot_grid(v2_plot, feature_stro_sox10, stro_sox10_2, stro_sox10_2.5)
+#save the picture
+ggsave("stro_sox10.pdf", width = 10, height = 8, path = outdir_plot)
+
+
+####################
+# Check the markers for endothelial cells MADCAM1
+
+#put in a dataframe the avarage expression per cluster of the marker for endothelial cells
+avg_exp_madcam1 <- AverageExpression(v2, features = "MADCAM1", assays = "RNA")
+avg_exp_madcam1_table <- data.frame(cluster=colnames(avg_exp_madcam1[['RNA']]), expression=as.vector(unlist(avg_exp_madcam1[['RNA']])))
+
+#create some new columns to define madcam1 positive cells based on different thresholds
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_madcam1_table[avg_exp_madcam1_table[['expression']] > 1, 'cluster'], 'madcam1_positive_1'] <- T
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_madcam1_table[avg_exp_madcam1_table[['expression']] <= 1, 'cluster'], 'madcam1_positive_1'] <- F
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_madcam1_table[avg_exp_madcam1_table[['expression']] > 2, 'cluster'], 'madcam1_positive_2'] <- T
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_madcam1_table[avg_exp_madcam1_table[['expression']] <= 2, 'cluster'], 'madcam1_positive_2'] <- F
+
+#create tables of the diff thresholds
+stro_madcam1_1 <- DimPlot(v2, group.by = 'madcam1_positive_1') + scale_color_manual(values=c('gray', 'red'))
+stro_madcam1_2 <- DimPlot(v2, group.by = 'madcam1_positive_2') + scale_color_manual(values=c('gray', 'red'))
+
+#create a grid with the original featuere plot and the plots having the diff thresholds
+plot_grid(v2_plot, feature_stro_madcam1, stro_madcam1_1, stro_madcam1_2)
+#save the picture
+ggsave("stro_madcam1.pdf", width = 10, height = 8, path = outdir_plot)
+
+
+
+#########################
+#  Immune Markers       #
+#########################
+
+#Feature plot of the main markers for the immune compartment
+feature_imm_ptprc <- FeaturePlot(v2, features=c('PTPRC')) #--> chosen PTPRC > 3
+feature_imm_cd27 <- FeaturePlot(v2, features=c('CD27'))  # --> chosen CD27 > 0.3
+
+
+#######################################
+#Put in a dataframe the avarage expression of CD45 based on clusters
+avg_exp_ptprc <- AverageExpression(v2, features = "PTPRC", assays = "RNA")
+avg_exp_ptprc_table <- data.frame(cluster=colnames(avg_exp_ptprc[['RNA']]), expression=as.vector(unlist(avg_exp_ptprc[['RNA']])))
+
+#create some new columns to definecd45 positive cells based on different thresholds
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_ptprc_table[avg_exp_ptprc_table[['expression']] > 3, 'cluster'], 'ptprc_positive_3'] <- T
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_ptprc_table[avg_exp_ptprc_table[['expression']] <= 3, 'cluster'], 'ptprc_positive_3'] <- F
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_ptprc_table[avg_exp_ptprc_table[['expression']] > 3.5, 'cluster'], 'ptprc_positive_3.5'] <- T
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_ptprc_table[avg_exp_ptprc_table[['expression']] <= 3.5, 'cluster'], 'ptprc_positive_3.5'] <- F
+
+#create tables of the diff thresholds
+imm_ptprc_3 <- DimPlot(v2, group.by = 'ptprc_positive_3') + scale_color_manual(values=c('gray', 'red'))
+imm_ptprc_3.5 <- DimPlot(v2, group.by = 'ptprc_positive_3.5') + scale_color_manual(values=c('gray', 'red'))
+
+#create a grid with the original featuere plot and the plots having the diff thresholds
+plot_grid(v2_plot, feature_imm_ptprc, imm_ptprc_3, imm_ptprc_3.5)
+#save the picture
+ggsave("imm_ptprc.pdf", width = 10, height = 8, path = outdir_plot)
+
+
+#######################################
+#Put in a dataframe the avarage expression of CD27 based on clusters
+avg_exp_cd27 <- AverageExpression(v2, features = "CD27", assays = "RNA")
+avg_exp_cd27_table <- data.frame(cluster=colnames(avg_exp_cd27[['RNA']]), expression=as.vector(unlist(avg_exp_cd27[['RNA']])))
+
+#create some new columns to define cd27 positive cells based on different thresholds
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_cd27_table[avg_exp_cd27_table[['expression']] >= 0.3, 'cluster'], 'cd27_positive_0.3'] <- T
+v2@meta.data[v2@meta.data[['seurat_clusters']] %in% avg_exp_cd27_table[avg_exp_cd27_table[['expression']] < 0.3, 'cluster'], 'cd27_positive_0.3'] <- F
+
+#create tables of the diff thresholds
+imm_cd27_0.3 <- DimPlot(v2, group.by = 'cd27_positive_0.3') + scale_color_manual(values=c('gray', 'red'))
+
+#create a grid with the original featuere plot and the plots having the diff thresholds
+plot_grid(v2_plot, feature_imm_cd27, imm_cd27_0.3)
+#save the picture
+ggsave("imm_cd27.pdf", width = 10, height = 8, path = outdir_plot)
+
+```
+
+
+## Definition of the main comparments 
+```{r define main compartments, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#create a column named compartments
+v2@meta.data$compartment <- 'none'
+
+#define epithelial, the cells
+v2@meta.data[v2@meta.data$epcam_positive_3 == T, 'compartment'] <- 'epithelial'
+#define the immune cells
+v2@meta.data[v2@meta.data$ptprc_positive_3 == T |
+               v2@meta.data$cd27_positive_0.3 == T, 'compartment'] <- 'immune'
+#define the stromal compartment
+v2@meta.data[v2@meta.data$thy1_positive_0.3 == T |
+               v2@meta.data$sox10_positive_2 == T |
+               v2@meta.data$madcam1_positive_1 == T, 'compartment'] <- 'stromal'
+
+#create a dimplot of the cell compartments
+compart <- DimPlot(v2, group.by = 'compartment') + scale_color_manual(values=c('firebrick', 'dodgerblue4', 'green4'))
+#grid of the cell compartment and of the seurat cluster
+plot_grid(v2_plot, compart)
+
+
+ggsave("v2_with_ileum_compartments.pdf", width = 20, height = 16, path = outdir_plot)
+
+
+```
+
+```{r folders for preprocessing and celltype annotation, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#########################################################################
+#   Processing and authomatic celltyping for each separate compartment  #
+#########################################################################
+
+outdir <- "/data/p307890/Vedo2/batch_2/celltyping/new_results/"
+outdir_plot <- paste0(outdir, "/plots/")
+outdir_object <- paste0(outdir, "/objects/")
+```
+
+
+## Epithelial Compartment: Preprocessing, Celltyping and Marker check
+```{r epithelial compartment, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+
+#read the original object
+## with is for without ileum object
+v2 <- readRDS(paste0(outdir_object, "v2_with_ileum_compartments.rds"))
+
+###############################
+# Preprocessing               #
+###############################
+
+#subset the original object based on the defined compartment
+epi <- v2[, v2@meta.data$compartment == 'epithelial']
+#set the normalised data
+DefaultAssay(epi)<-"SCT" 
+#set seed
+set.seed(0)
+#find variables
+epi <- FindVariableFeatures(epi, assay = 'SCT')
+#run pca
+epi<- RunPCA(epi)
+#run umap
+epi <- RunUMAP(epi, dims = 1:30)
+#find neighbors
+epi<-FindNeighbors(epi, dims = 1:30)
+#cluster
+epi<-FindClusters(epi, resolution = 1.2)
+#create the plot of clusters
+epi_plot <- DimPlot(epi, group.by = "seurat_clusters", label = T, label.box = T, pt.size = 0.5, repel = T) + NoLegend()
+#save the plot
+ggsave("epi_v2_clusters.pdf", width = 10, height = 8, path = outdir_plot)
+#save the object
+saveRDS(epi, paste0(outdir_object, "vedo2_v2_epi.rds"))
+
+
+###############################
+# Azimuth                     #
+###############################
+
+dir <- "/data/p307890/Vedo2/batch_2/celltyping/objects/"
+
+#read the trained smillie dataset for epithelial
+Smillie_epi_ref <- readRDS(paste0(dir, "train.Epi.seur.rds"))
+#/groups/umcg-weersma/tmp01/datasets/smillie/singlecell_broad_files/Smillie_discovery_cohort
+#normalize the dataset
+Smillie_epi_ref <- normalize_and_cluster_sct_method_1(Smillie_epi_ref)
+#save the object
+saveRDS(Smillie_epi_ref, paste0(dir, "/train.Epi.seur.sct.rds"))
+
+#set the normalized data in the epi object
+DefaultAssay(epi) <- "SCT"
+
+#run azimuth on the non trained dataset
+epi <- azimuth_mapping(seurat_object = epi, reference = Smillie_epi_ref)
+#saved the new object
+saveRDS(epi, paste0(outdir_object, 'vedo2_v2_epi_azimuth.rds'))
+# check how well the classification looks compared to the clusters
+p1 <- DimPlot(epi, group.by = "seurat_clusters", label = T, label.box = T, pt.size = 0.5, repel = T) + NoLegend()
+p2 <- DimPlot(epi, group.by = "predicted.cell_type.pred", label = T, label.box = T, pt.size = 0.5, repel = T) + NoLegend()
+p1 + p2
+
+#save the final picture 
+ggsave("epi_v2_azimuth_celltypes.pdf", width = 10, height = 8, path = outdir_plot)
+
+
+###############################
+# Batch effect                #
+###############################
+
+epi_batch <- DimPlot(epi, group.by = "batch", label = F, label.box = T, pt.size = 0.5, repel = T) 
+ggsave("epi_v2_rest_batch.pdf", width = 10, height = 8, path = outdir_plot)
+#
+epi_lane <- DimPlot(epi, group.by = "lane", label = F, label.box = T, pt.size = 0.5, repel = T) 
+ggsave("epi_v2_rest_lane.pdf", width = 10, height = 8, path = outdir_plot)
+#
+epi_patient <- DimPlot(epi, group.by = "patient", label = F, label.box = T, pt.size = 0.5, repel = T) 
+ggsave("epi_v2_rest_patient.pdf", width = 10, height = 8, path = outdir_plot)
+#
+epi_timepoint <- DimPlot(epi, group.by = "timepoint", label = F, label.box = T, pt.size = 0.5, repel = T) 
+ggsave("epi_v2_rest_timepoint.pdf", width = 10, height = 8, path = outdir_plot)
+#
+epi_location <- DimPlot(epi, group.by = "location", label = F, label.box = T, pt.size = 0.5, repel = T) 
+ggsave("epi_v2_rest_location.pdf", width = 10, height = 8, path = outdir_plot)
+#
+epi_inflammation <- DimPlot(epi, group.by = "inflammation", label = F, label.box = T, pt.size = 0.5, repel = T) 
+ggsave("epi_v2_rest_infammation.pdf", width = 10, height = 8, path = outdir_plot)
+
+
+#########################################################
+#  Check Paneth like cells markers                      #
+#########################################################
+
+#The add metadata object is the same of vedo2_v2_epi_azimuth.rds but some relevant metadata for the subsequent analysis were added
+dir <- "/Users/paolapibiri/Desktop/Vedo2/Vedo2_biopsy_batch1_2/Celltyping/new_results/objects/add_metadata_colonic/"
+
+#read the epithelial seurat object
+epi <- readRDS(paste0(dir, "vedo2_v2_epi_azi_add_metadata.rds"))
+
+#check with feature plot the relevant markers
+feature_epi_LYZ <- FeaturePlot(epi, features=c('LYZ')) 
+feature_epi_REG3A <- FeaturePlot(epi, features=c('REG3A'))
+
+
+#decided to use only two markers for defining the Paneth like cells, because they are the most informative
+#calculate the module score
+epi <- AddModuleScore(epi, features = list(c('LYZ', 'REG3A')), name = 'paneth_markers_2', nbin = 24)
+#check the feature plot
+epi_paneth_2 <- FeaturePlot(epi, features = 'paneth_markers_21')
+
+#select the cells that have a module score marker higher tha 2. The score is calculated per cell in order to be more precise (few cells)
+epi@meta.data$paneth_like_positive <- epi@meta.data$paneth_markers_21 > 2
+#visualize the paneth cells
+epi_pos <- DimPlot(epi, group.by = 'paneth_like_positive') + scale_color_manual(values=c('gray', 'red'))
+# grid
+plot_grid(epi_paneth, epi_paneth_2, epi_pos)
+
+```
+
+
+## Stromal Compartment: Preprocessing and Celltyping 
+```{r stomal compartment, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#############################################
+#   2. STROMAL                              #
+#############################################
+
+#read the original v2 object without ileum
+v2 <- readRDS(paste0(outdir_object, "v2_with_ileum_compartments.rds"))
+
+
+###############################
+# Preprocessing               #
+###############################
+
+#subset the stromal object based on the previously defined compartments
+stro <- v2[, v2@meta.data$compartment == 'stromal']
+#set to normalised data
+DefaultAssay(stro)<-"SCT"
+#set seed
+set.seed(0)
+#find variables
+stro <- FindVariableFeatures(stro, assay = 'SCT')
+#run pca
+stro<- RunPCA(stro)
+#run umap
+stro <- RunUMAP(stro, dims = 1:30)
+#find neighbors
+stro <-FindNeighbors(stro, dims = 1:30)
+#find clusters
+stro <-FindClusters(stro, resolution = 1.2)
+#dimplot
+stro_plot <- DimPlot(stro, group.by = "seurat_clusters", label = T, label.box = T, pt.size = 0.5, repel = T) + NoLegend()
+# save the dimplot
+ggsave("stro_v2_clusters.pdf", width = 10, height = 8, path = outdir_plot)
+# save the object
+saveRDS(stro, paste0(outdir_object, "vedo2_v2_stro.rds"))
+
+
+###############################
+# Azimuth                     #
+###############################
+
+dir <- "/data/p307890/Vedo2/batch_2/celltyping/objects/"
+
+#read the trained dataset of smillie for the stromal compartment
+Smillie_fib_ref <- readRDS(paste0(dir, "train.Fib.seur.rds"))
+#normalize it
+Smillie_fib_ref <- normalize_and_cluster_sct_method_1(Smillie_fib_ref)
+#save the object
+saveRDS(Smillie_fib_ref, paste0(dir, "/train.Fib.seur.sct.rds"))
+
+#set default normalized data 
+DefaultAssay(stro) <- "SCT"
+#run azimuth for the noin trained 
+stro <- azimuth_mapping(seurat_object = stro, reference = Smillie_fib_ref)
+
+#save the final seurat object
+saveRDS(stro, paste0(outdir_object, "vedo2_v2_stro_azimuth.rds"))
+# check how well the classification looks compared to the clusters
+p3 <- DimPlot(stro, group.by = "seurat_clusters", label = T, label.box = T, pt.size = 0.5, repel = T) + NoLegend()
+p4 <- DimPlot(stro, group.by = "predicted.cell_type.pred", label = T, label.box = T, pt.size = 0.5, repel = T) + NoLegend()
+p3 + p4
+
+#save the final picture 
+ggsave("stro_v2_azimuth_celltypes.pdf", width = 10, height = 8, path = outdir_plot)
+
+
+###############################
+# Batch effect                #
+###############################
+
+stro_batch <- DimPlot(stro, group.by = "batch", label = F, label.box = T, pt.size = 0.5, repel = T) 
+ggsave("stro_v2_rest_batch.pdf", width = 10, height = 8, path = outdir_plot)
+#
+stro_lane <- DimPlot(stro, group.by = "lane", label = F, label.box = T, pt.size = 0.5, repel = T) 
+ggsave("stro_v2_rest_lane.pdf", width = 10, height = 8, path = outdir_plots)
+#
+stro_patient <- DimPlot(stro, group.by = "patient", label = F, label.box = T, pt.size = 0.5, repel = T) 
+ggsave("stro_v2_rest_patient.pdf", width = 10, height = 8, path = outdir_plot)
+#
+stro_timepoint <- DimPlot(stro, group.by = "timepoint", label = F, label.box = T, pt.size = 0.5, repel = T) 
+ggsave("stro_v2_rest_timepoint.pdf", width = 10, height = 8, path = outdir_plot)
+#
+stro_location <- DimPlot(stro, group.by = "location", label = F, label.box = T, pt.size = 0.5, repel = T) 
+ggsave("stro_v2_rest_location.pdf", width = 10, height = 8, path = outdir_plot)
+#
+stro_inflammation <- DimPlot(stro, group.by = "inflammation", label = F, label.box = T, pt.size = 0.5, repel = T) 
+ggsave("stro_v2_rest_infammation.pdf", width = 10, height = 8, path = outdir_plot)
+
+```
+
+
+## Immune Compartment: Preprocessing, Celltyping and Marker check
+```{r immune compartment, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#############################################
+#   3. IMMUNE                               #
+#############################################
+
+#read the original v2 object without ileum
+v2 <- readRDS(paste0(outdir_object, "v2_with_ileum_compartments.rds"))
+
+#####
+
+
+#subset the object based on the previously defined compartments
+imm <- v2[, v2@meta.data$compartment == 'immune']
+
+######################################
+#   Further filter of the MT content #
+######################################
+
+#check the mt content in a plot
+imm_mt <- plot_ncount_vs_mitopct(imm@meta.data)
+#save the picture
+ggsave("imm_mt.pdf", width = 10, height = 8, path = outdir_plot)
+
+#try different tresholds for the mt content
+imm@meta.data[imm@meta.data[['percent.mt']] < 15,  'threshold_mt_15'] <- T
+imm@meta.data[imm@meta.data[['percent.mt']] >= 15, 'threshold_mt_15'] <- F
+#
+imm@meta.data[imm@meta.data[['percent.mt']] < 20,  'threshold_mt_20'] <- T
+imm@meta.data[imm@meta.data[['percent.mt']] >= 20, 'threshold_mt_20'] <- F
+
+#check the plots 
+imm_mt_15 <- DimPlot(imm, group.by = 'threshold_mt_15') + scale_color_manual(values=c('gray', 'red'))
+imm_mt_20 <- DimPlot(imm, group.by = 'threshold_mt_20') + scale_color_manual(values=c('gray', 'red'))
+#plot grid with the options --> decided on 20%
+plot_grid(imm_mt, imm_mt_20, imm_mt_15)
+
+#save the picture
+ggsave("imm_mt_15_20.pdf", width = 10, height = 8, path = outdir_plot)
+
+#filter out in the imm objects the cells with mt > 20%
+imm <- imm[ , imm@meta.data$percent.mt < 20]
+
+#save the new object
+saveRDS(imm, paste0(outdir_object, "vedo2_v2_imm_mt20.rds"))
+
+###############################
+# Preprocessing               #
+###############################
+
+#set to normalized data the assay
+DefaultAssay(imm)<-"SCT"
+# set seed
+set.seed(0)
+#run pca
+imm<- RunPCA(imm)
+#run umap
+imm <- RunUMAP(imm, dims = 1:30)
+#run neighbors
+imm <-FindNeighbors(imm, dims = 1:30)
+#clusters
+imm <-FindClusters(imm, resolution = 1.2)
+#dimplot of cluster
+imm_plot <- DimPlot(imm, group.by = "seurat_clusters", label = T, label.box = T, pt.size = 0.5, repel = T) + NoLegend()
+#save the picture
+ggsave("imm_v2_clusters_mt.pdf", width = 10, height = 8, path = "/data/p307890/Vedo2/batch_2/celltyping/new_results/plots")
+#save the object
+saveRDS(imm,  paste0(outdir_object, "vedo2_v2_imm_mt.rds"))
+
+
+###############################
+# Azimuth                     #
+###############################
+
+dir <- "/data/p307890/Vedo2/batch_2/celltyping/objects/"
+
+Smillie_imm_ref <- readRDS(paste0(dir, "train.Imm.seur.rds"))
+#/groups/umcg-weersma/tmp01/datasets/smillie/singlecell_broad_files/Smillie_discovery_cohort/
+Smillie_imm_ref <- normalize_and_cluster_sct_method_1(Smillie_imm_ref)
+#Smillie_imm_ref <- RunUMAP(Smillie_imm_ref, dims=1:30, return.model = T)
+saveRDS(Smillie_imm_ref, paste0(dir,"train.Imm.seur.sct.rds"))
+
+#set the default assay to normalized data
+DefaultAssay(imm) <- "SCT"
+#run azimuth
+imm <- azimuth_mapping(seurat_object = imm, reference = Smillie_imm_ref)
+
+#save the obtained seurat object
+saveRDS(imm, paste0(outidr_object, "vedo2_imm_azimuth_mt.rds"))
+# check how well the classification looks compared to the clusters
+p5 <- DimPlot(imm, group.by = "seurat_clusters", label = T, label.box = T, pt.size = 0.5, repel = T) + NoLegend()
+p6 <- DimPlot(imm, group.by = "predicted.cell_type.pred", label = T, label.box = T, pt.size = 0.5, repel = T) + NoLegend()
+p5 + p6
+#save the final picture 
+ggsave("imm_azimuth_celltypes_mt.pdf", width = 10, height = 8,path = outdir_plot)
+
+
+
+###############################
+# Batch effect                #
+###############################
+
+imm_batch <- DimPlot(imm, group.by = "batch", label = F, label.box = T, pt.size = 0.5, repel = T) 
+ggsave("imm_v2_rest_batch_mt.pdf", width = 10, height = 8, path = outdir_plot)
+
+#
+imm_lane <- DimPlot(imm, group.by = "lane", label = F, label.box = T, pt.size = 0.5, repel = T) 
+ggsave("imm_v2_rest_lane_mt.pdf", width = 10, height = 8, path = outdir_plot)
+
+#
+imm_patient <- DimPlot(imm, group.by = "patient", label = F, label.box = T, pt.size = 0.5, repel = T) 
+ggsave("imm_v2_rest_patient_mt.pdf", width = 10, height = 8, path = outdir_plot)
+
+#
+imm_timepoint <- DimPlot(imm, group.by = "timepoint", label = F, label.box = T, pt.size = 0.5, repel = T) 
+ggsave("imm_v2_rest_timepoint_mt.pdf", width = 10, height = 8, path = outdir_plot)
+
+#
+imm_location <- DimPlot(imm, group.by = "location", label = F, label.box = T, pt.size = 0.5, repel = T) 
+ggsave("imm_v2_rest_location_mt.pdf", width = 10, height = 8, path = outdir_plot)
+
+#
+imm_inflammation <- DimPlot(imm, group.by = "inflammation", label = F, label.box = T, pt.size = 0.5, repel = T) 
+ggsave("imm_v2_rest_infammation_mt.pdf", width = 10, height = 8, path = outdir_plot)
+
+
+
+#########################
+#   pDc markers         #
+#########################
+
+#read the immune object
+imm <- readRDS(paste0(outdir_object, 'vedo2_imm_082022.rds'))
+
+
+#feature plot of the main markers for pDc
+feature_imm_CD8A <- FeaturePlot(imm_mono, features=c('CD8A')) 
+feature_imm_IFNAR1 <- FeaturePlot(imm_mono, features=c('IFNAR1'))
+feature_imm_ITGAE <- FeaturePlot(imm_mono, features=c('ITGAE')) 
+feature_imm_IL3RA <- FeaturePlot(imm_mono, features=c('IL3RA')) 
+#show the ones available in a plot grid
+plot_grid(feature_imm_CD8A,feature_imm_IFNAR1, feature_imm_ITGAE, feature_imm_IL3RA)
+
+#calculate the module score for pDc markers
+imm <- AddModuleScore(imm, features = list(c('ITM2C', 'PLD4', 'SERPINF1', 'LILRA4', 'IL3RA', 'TPM2', 'MZB1',
+                                             'SPIB', 'IRF4', 'SMPD3')), name = 'pDc')
+#show the result in a feature plot
+imm_pDc <- FeaturePlot(imm, features = 'pDc1')
+
+#check the threshold for the used markers per cell
+imm@meta.data[imm@meta.data$pDc1 >= 0.7, 'pDc_positive_07'] <- TRUE
+imm@meta.data[imm@meta.data$pDc1 < 0.7, 'pDc_positive_07'] <- FALSE
+imm@meta.data[imm@meta.data$pDc1 >= 0.6, 'pDc_positive_06'] <- TRUE
+imm@meta.data[imm@meta.data$pDc1 < 0.6, 'pDc_positive_06'] <- FALSE
+imm@meta.data[imm@meta.data$pDc1 >= 0.5, 'pDc_positive_05'] <- TRUE
+imm@meta.data[imm@meta.data$pDc1 < 0.5, 'pDc_positive_05'] <- FALSE
+
+#visualize the pDc threshold
+imm_pDc_plot_06 <- DimPlot(imm, group.by = 'pDc_positive_06') + scale_color_manual(values=c('gray', 'red'))
+imm_pDc_plot_07 <- DimPlot(imm, group.by = 'pDc_positive_07') + scale_color_manual(values=c('gray', 'red'))
+imm_pDc_plot_05 <- DimPlot(imm, group.by = 'pDc_positive_05') + scale_color_manual(values=c('gray', 'red'))
+
+#check the results in a plotgrid
+plot_grid(imm_pDc, imm_pDc_plot_06, imm_pDc_plot_07, imm_pDc_plot_05)
+
+#modify the final celltype name including the pDc cells 
+# create a copy of the actual celltype
+imm@meta.data$predicted.cell_type.pred1 <- imm@meta.data$predicted.cell_type.pred
+
+#modify the copy of the new celltype
+imm@meta.data[imm@meta.data$pDc_positive_06 == T, 'predicted.cell_type.pred1'] <- 'pDc'
+unique(imm@meta.data$predicted.cell_type.pred1)
+
+#create the new object and save it
+saveRDS(imm, paste0(outdir_object, 'vedo2_imm_082022_2.rds'))
+#save the picture
+imm_plot <- DimPlot(imm, group.by = "predicted.cell_type.pred1", label = T, label.box = T, pt.size = 0.5, repel = T) + NoLegend()
+ggsave(paste0(outdir_plot, 'Imm_plot_with_pDc.pdf'))
+
+
+
+###################################
+#   Plasma cells markers          #
+###################################
+#check marker for plasma cells
+
+#### IGA
+#feature plot of IgA marker
+feature_imm_iga <- FeaturePlot(imm, features=c('IGHA1'))
+#calculate the avarage expression of the marker per cluster
+avg_exp_iga <- AverageExpression(imm, features = "IGHA1", assays = "RNA")
+#set data into a dataframe
+avg_exp_iga_table <- data.frame(cluster=colnames(avg_exp_iga[['RNA']]), expression=as.vector(unlist(avg_exp_iga[['RNA']])))
+
+#check the different options of threshold 
+#use 200
+imm@meta.data[imm@meta.data[['seurat_clusters']] %in% avg_exp_iga_table[avg_exp_iga_table[['expression']] >= 400, 'cluster'], 'iga_positive_400'] <- T
+imm@meta.data[imm@meta.data[['seurat_clusters']] %in% avg_exp_iga_table[avg_exp_iga_table[['expression']] < 400, 'cluster'], 'iga_positive_400'] <- F
+imm@meta.data[imm@meta.data[['seurat_clusters']] %in% avg_exp_iga_table[avg_exp_iga_table[['expression']] >= 200, 'cluster'], 'iga_positive_200'] <- T
+imm@meta.data[imm@meta.data[['seurat_clusters']] %in% avg_exp_iga_table[avg_exp_iga_table[['expression']] < 200, 'cluster'], 'iga_positive_200'] <- F
+
+#check the plots
+imm_iga_200 <- DimPlot(imm, group.by = 'iga_positive_200') + scale_color_manual(values=c('gray', 'red'))
+imm_iga_400 <- DimPlot(imm, group.by = 'iga_positive_400') + scale_color_manual(values=c('gray', 'red'))
+
+#plo grid
+plot_grid(feature_imm_iga, imm_iga_400, imm_iga_200)
+#save the picture
+ggsave("imm_iga_mt.pdf", width = 10, height = 8, path = outdir_plot)
+
+#### IGG
+#feature plot of IgG marker
+feature_imm_igg <- FeaturePlot(imm, features=c('IGHG1'))
+#calculate the avarage expression of the marker per cluster
+avg_exp_igg <- AverageExpression(imm, features = "IGHG1", assays = "RNA")
+#set data into a dataframe
+avg_exp_igg_table <- data.frame(cluster=colnames(avg_exp_igg[['RNA']]), expression=as.vector(unlist(avg_exp_igg[['RNA']])))
+
+#check the threshold
+imm@meta.data[imm@meta.data[['seurat_clusters']] %in% avg_exp_igg_table[avg_exp_igg_table[['expression']] >= 90, 'cluster'], 'igg_positive_90'] <- T
+imm@meta.data[imm@meta.data[['seurat_clusters']] %in% avg_exp_igg_table[avg_exp_igg_table[['expression']] < 90, 'cluster'], 'igg_positive_90'] <- F
+
+#check the dimplot
+imm_igg_90 <- DimPlot(imm, group.by = 'igg_positive_80') + scale_color_manual(values=c('gray', 'red'))
+
+#plot grid
+plot_grid(imm_plot, feature_imm_igg, imm_igg_80)
+#save the picture
+ggsave("imm_igg_mt.pdf", width = 10, height = 8, path = outdir_plot)
+
+#### IGM
+#feature plot of IgM marker
+feature_imm_igm <- FeaturePlot(imm, features=c('IGHM'))
+#calculate the avarage expression of the marker per cluster
+avg_exp_igm <- AverageExpression(imm, features = "IGHM", assays = "RNA")
+#set data into a dataframe
+avg_exp_igm_table <- data.frame(cluster=colnames(avg_exp_igm[['RNA']]), expression=as.vector(unlist(avg_exp_igm[['RNA']])))
+
+#check the threshold
+imm@meta.data[imm@meta.data[['seurat_clusters']] %in% avg_exp_igm_table[avg_exp_igm_table[['expression']] >= 900, 'cluster'], 'igm_positive_900'] <- T
+imm@meta.data[imm@meta.data[['seurat_clusters']] %in% avg_exp_igm_table[avg_exp_igm_table[['expression']] < 900, 'cluster'], 'igm_positive_900'] <- F
+
+#check the dimplot
+imm_igm_900 <- DimPlot(imm, group.by = 'igm_positive_900') + scale_color_manual(values=c('gray', 'red'))
+
+#plot grid
+plot_grid(imm_plot, feature_imm_igm, imm_igm_900)
+#save the picture
+ggsave("imm_igm_mt.pdf", width = 10, height = 8, path = outdir_plot)
+
+
+
+#############Divide the plasma compartments
+#create a new column for the plasma compartment and fill it with the previously decided divisions
+imm@meta.data$plasma_compartment <- 'not_plasma'
+imm@meta.data[imm@meta.data$predicted.cell_type.pred == 'Plasma', 'plasma_compartment'] <- 'Ig_negative'
+imm@meta.data[imm@meta.data$iga_positive_250 == T, 'plasma_compartment'] <- 'IgA'
+imm@meta.data[imm@meta.data$igg_positive_80 == T, 'plasma_compartment'] <- 'IgG'
+imm@meta.data[imm@meta.data$igm_positive_900 == T, 'plasma_compartment'] <- 'IgM'
+
+#dimplot of the compartment
+compart_plasma <- DimPlot(imm, group.by = 'plasma_compartment') + scale_color_manual(values=c('black', 'firebrick', 'dodgerblue4', 'green4', 'grey'))
+plot_grid(imm_plot, compart_plasma)
+#save the picture
+ggsave("v2_no_ileum_plasma_compart.pdf", width = 20, height = 16, path = outdir_plot)
+#save the object
+saveRDS(imm, paste0(outdir_object, "v2_imm_plasma_compart_mt20.rds"))
+
+
+#create a new final celltype, with the plasma cells annotated 
+unique(imm@meta.data$predicted.cell_type.pred2)
+
+imm@meta.data$predicted.cell_type.pred2 <- imm@meta.data$predicted.cell_type.pred1
+imm@meta.data[imm@meta.data$plasma_compartments == 'IgA', 'predicted.cell_type.pred2'] <- 'IgA'
+imm@meta.data[imm@meta.data$plasma_compartments == 'IgG', 'predicted.cell_type.pred2'] <- 'IgG'
+imm@meta.data[imm@meta.data$plasma_compartments == 'IgM', 'predicted.cell_type.pred2'] <- 'IgM'
+imm@meta.data[imm@meta.data$plasma_compartments == 'Ig_negative', 'predicted.cell_type.pred2'] <- 'Ig_negative'
+
+celltype_final <- DimPlot(imm, group.by = 'predicted.cell_type.pred2', label = T, label.box = T,  label.size = 3, repel = TRUE, raster=FALSE) + NoLegend()  
+
+#save the rds object
+saveRDS(imm, paste0(outdir_object, 'vedo2_imm_102022.rds'))
+
+```
+
+
+## Input for Cell abundances analyses
+```{r cell abundances input, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# define directories 
+outdir <- "/data/p307890/Vedo2/batch_2/celltyping/new_results/"
+outdir_plot <- paste0(outdir, "/plots/")
+outdir_object <- paste0(outdir, "/objects/")
+
+
+#Read the last version for compartment of the seurat object
+imm <- readRDS(paste0(outdir_object, "vedo2_imm_102022_v1.rds"))
+epi <- readRDS(paste0(outdir_object, "vedo2_epi_082022.rds"))
+stro <- readRDS(paste0(outdir_object, "vedo2_stro_082022.rds"))
+
+## extract counts to matrix for each compartment
+
+#select the columns that you want to include in the metadata for the immune compartment
+imm@meta.data$condition <- paste0(imm@meta.data$Final_HTO, '_', imm@meta.data$timepoint, '_', imm@meta.data$anti_TNF_status, '_', imm@meta.data$PGA._resp, imm@meta.data$inflammation)
+# create the data structure for scCODA and cell abundance analysis
+imm_counts=as.data.frame.matrix(table(imm@meta.data[, c('condition', 'predicted.cell_type.pred2')]))
+#call the column with the covariate as condition
+imm_counts['condition'] <- rownames(imm_counts)
+# change the location of the condition column
+imm_counts <- imm_counts[, c('condition', setdiff(colnames(imm_counts), 'condition'))]
+#
+
+#select the columns that you want to include in the metadata for the epithelial compartment
+epi@meta.data$condition <- paste0(epi@meta.data$Final_HTO, '_', epi@meta.data$timepoint, '_', epi@meta.data$anti_TNF_status, '_', epi@meta.data$PGA._resp, epi@meta.data$inflammation)
+# create the data structure for scCODA and cell abundance analysis
+epi_counts=as.data.frame.matrix(table(epi@meta.data[, c('condition', 'predicted.cell_type.pred1')]))
+#call the column with the covariate as condition
+epi_counts['condition'] <- rownames(epi_counts)
+# change the location of the condition column
+epi_counts <- epi_counts[, c('condition', setdiff(colnames(epi_counts), 'condition'))]
+#
+
+#select the columns that you want to include in the metadata for the stromal compartment
+stro@meta.data$condition <- paste0(stro@meta.data$Final_HTO, '_', stro@meta.data$timepoint, '_', stro@meta.data$anti_TNF_status, '_', stro@meta.data$PGA._resp, stro@meta.data$inflammation)
+# create the data structure for scCODA and cell abundance analysis
+stro_counts=as.data.frame.matrix(table(stro@meta.data[, c('condition', 'predicted.cell_type.pred')]))
+#call the column with the covariate as condition
+stro_counts['condition'] <- rownames(stro_counts)
+# change the location of the condition column
+stro_counts <- stro_counts[, c('condition', setdiff(colnames(stro_counts), 'condition'))]
+
+#save the dataframe in csv file 
+write.csv(imm_counts, 'imm_count.csv')
+write.csv(epi_counts, 'epi_count.csv')
+write.csv(stro_counts, 'stro_count.csv')
+
+#save the file
+write.csv(imm_epi_stro, paste0(outdir_object, 'vedo2_batch12_counts.csv'))
+
+# use a function to separate again the columns previously merged
+imm_epi_stro <- add_data_from_rownames(imm_epi_stro, column_names = c('Final_HTO', 'timepoint', 'antiTNF-status', 'response', 'inflammation'))
+
+### Filter by condition for the conditions
+
+### filter responders
+epi_stro_imm_2_responders <- epi_stro_imm_2[epi_stro_imm_2$response == 'yes', ]
+epi_stro_imm_2_responders[['antiTNF-status']] <- NULL
+epi_stro_imm_2_responders[['response']] <- NULL
+
+#write the file 
+write.csv(epi_stro_imm_2_responders, paste0(outdir_object, 'vedo2_batch12_counts_R.csv'))
+
+
+## filter non responders 
+epi_stro_imm_2_non_responders <- epi_stro_imm_2[epi_stro_imm_2$response == 'no', ]
+epi_stro_imm_2_non_responders[['antiTNF-status']] <- NULL
+epi_stro_imm_2_non_responders[['response']] <- NULL
+
+write.csv(epi_stro_imm_2_non_responders, paste0(outdir_object, 'vedo2_batch12_counts_NR.csv'))
+
+## filter naive
+epi_stro_imm_2_naive <- epi_stro_imm_2[epi_stro_imm_2[['antiTNF-status']] == 'Naïve', ]
+epi_stro_imm_2_naive[['antiTNF-status']] <- NULL
+epi_stro_imm_2_naive[['response']] <- NULL
+
+write.csv(epi_stro_imm_2_naive, paste0(outdir_object, 'vedo2_batch12_counts_naive.csv'))
+
+## filter exposed
+epi_stro_imm_2_exposed <- epi_stro_imm_2[epi_stro_imm_2[['antiTNF-status']] == 'Exposed', ]
+epi_stro_imm_2_exposed[['antiTNF-status']] <- NULL
+epi_stro_imm_2_exposed[['response']] <- NULL
+
+write.csv(epi_stro_imm_2_exposed, paste0(outdir_object,'vedo2_batch12_counts_exposed.csv'))
+
+## filter t0
+epi_stro_imm_2_t0 <- epi_stro_imm_2[epi_stro_imm_2[['timepoint']] == 'T0', ]
+epi_stro_imm_2_t0[['antiTNF-status']] <- NULL
+epi_stro_imm_2_t0[['timepoint']] <- NULL
+
+write.csv(epi_stro_imm_2_t0, paste0(outdir_object, 'vedo2_batch12_counts.csv'))
+
+##filter for T4
+epi_stro_imm_2_t4 <- epi_stro_imm_2[epi_stro_imm_2[['timepoint']] == 'T4', ]
+epi_stro_imm_2_t4[['antiTNF-status']] <- NULL
+epi_stro_imm_2_t4[['timepoint']] <- NULL
+
+write.csv(epi_stro_imm_2_t4, paste0(outdir_object, '/vedo2_batch12_counts_t4.csv'))
+
+```
+
+
+
+
+
+
+

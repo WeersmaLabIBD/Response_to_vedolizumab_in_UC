@@ -1,0 +1,399 @@
+---
+title: "Cellchat analysis"
+author: "Paola Pibiri"
+output: html_document
+---
+
+```{r header, include=FALSE}
+############################################################################################################################
+# Authors: Paola Pibiri, Shiqiang Sun
+# Name: Vedo2Project_Cellchat_analysis.Rmd
+# Function: perform the analysis of cellchat and relative plots  
+############################################################################################################################
+```
+
+
+```{r libraries, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+####################
+# libraries        #
+####################
+
+library(Seurat)
+library(Matrix)
+library(CellChat)
+library(patchwork)
+library(ggpubr)
+```
+
+
+
+```{r functions, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#######################################
+# Functions                           #
+#######################################
+
+# set some options
+options(stringsAsFactors = FALSE)
+
+# functions
+init_cellchat_object <- function(seurat_object, assay = 'SCT', slot = 'data', ident = 'celltype_final.v1'){
+  # set the default assay
+  DefaultAssay(seurat_object) <- assay
+  # extract the data
+  data.input <- GetAssayData(seurat_object, assay = assay, slot = slot)
+  meta <- seurat_object@meta.data
+  # create the object
+  cellchat <- createCellChat(object = data.input, meta = meta, group.by = ident)
+  return(cellchat)
+}
+
+preprocess_cellchat_object <- function(chat_object, nthreads=8){
+  # set the database
+  CellChatDB <- CellChatDB.human # use CellChatDB.mouse if running on mouse data
+  CellChatDB.use <- CellChatDB # simply use the default CellChatDB
+  chat_object@DB <- CellChatDB.use
+  chat_object <- subsetData(chat_object) # This step is necessary even if using the whole database
+  # set multithreading options
+  future::plan("multiprocess", workers = nthreads) # do parallel
+  # get genes
+  chat_object <- identifyOverExpressedGenes(chat_object)
+  chat_object <- identifyOverExpressedInteractions(chat_object)
+  # project gene expression data onto PPI network (optional)
+  chat_object <- projectData(chat_object, PPI.human)
+  return(chat_object)
+}
+
+inference_communication_network <- function(chat_object, min.cells=10, thresh=1){
+  # Compute the communication probability and infer cellular communication network
+  chat_object <- computeCommunProb(chat_object)
+  # Filter out the cell-cell communication if there are only few number of cells in certain cell groups
+  chat_object <- filterCommunication(chat_object, min.cells = min.cells)
+  # Infer the cell-cell communication at a signaling pathway level
+  chat_object <- computeCommunProbPathway(chat_object, thresh = thresh)
+  # Calculate the aggregated cell-cell communication network
+  chat_object <- aggregateNet(chat_object, thresh = thresh)
+  return(chat_object)
+}
+
+do_default_cellchat_workflow <- function(seurat_object, assay = 'SCT', slot = 'data', ident = 'celltype_final.v1', min.cells=10, nthreads=8, thresh=0.05){
+  # go through the steps
+  chat_object <- init_cellchat_object(seurat_object, assay = assay, slot = slot, ident = ident)
+  chat_object <- preprocess_cellchat_object(chat_object, nthreads = nthreads)
+  chat_object <- inference_communication_network(chat_object, min.cells = min.cells, thresh = thresh)
+  return(chat_object)
+}
+
+do_default_cellchat_workflow_per_timepoint <- function(seurat_object, timepoint.column='timepoint.final', assay = 'SCT', slot = 'data', ident = 'celltype_final.v1', min.cells=10, nthreads=8, thresh=0.05){
+  # save the objects in a list
+  chat_per_timepoint <- list()
+  # check each cell type
+  for(timepoint in unique(seurat_object@meta.data[[timepoint.column]])){
+    # subset to that timepoint
+    seurat_timepoint <- seurat_object[, seurat_object@meta.data[[timepoint.column]] == timepoint]
+    # go through the work flow
+    chat_timepoint <- do_default_cellchat_workflow(seurat_timepoint, assay = assay, slot = slot, ident = ident, min.cells=min.cells, nthreads=nthreads, thresh = thresh)
+    # add to list
+    chat_per_timepoint[[timepoint]] <- chat_timepoint
+  }
+  return(chat_per_timepoint)
+}
+
+
+plot_communication_network <- function(chat_object){
+  groupSize <- as.numeric(table(chat_object@idents))
+  par(mfrow = c(1,2), xpd=TRUE)
+  netVisual_circle(chat_object@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+  netVisual_circle(chat_object@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+}
+
+plot_communication_network_separate <- function(chat_object, slot = 'weight'){
+  # grab the number of groups
+  groupSize <- as.numeric(table(chat_object@idents))
+  # grab the right slot
+  mat <- chat_object@net[[slot]]
+  # make a perfect square of the plot
+  par(mfrow = c(ceiling(sqrt(nrow(mat))),ceiling(sqrt(nrow(mat)))), xpd=TRUE)
+  # make the plots
+  for (i in 1:nrow(mat)) {
+    mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames = dimnames(mat))
+    mat2[i, ] <- mat[i, ]
+    netVisual_circle(mat2, vertex.weight = groupSize, weight.scale = T, edge.weight.max = max(mat), title.name = rownames(mat)[i], arrow.size=0.005)
+  }
+  par(mfrow=c(1,1))
+}
+
+plot_all_communications_networks_separate <- function(chat_object_per_timepoint_and_chem, output_loc='', file_type='pdf', chems=c('V2', 'V3'), width=10, height=10, slot = 'weight'){
+  # plot each timepoint
+  for(timepoint in names(chat_object_per_timepoint_and_chem[[chems[[1]]]])){
+    # plot each chem
+    for(chem in chems){
+      # paste the full output loc
+      output_loc_full <- paste(output_loc, 'communications_separate_', timepoint, '_', chem, '_', slot, '.', file_type, sep = '')
+      print(output_loc_full)
+      # init where we will save
+      if(file_type == 'pdf'){
+        pdf(output_loc_full, width = width, height = height)
+      }
+      else if(file_type == 'png'){
+        png(output_loc_full, width = width, height = height)
+      }
+      else{
+        print('unknown file type, doing pdf instead')
+        pdf(output_loc_full, width = width, height = height)
+      }
+      try({
+        # grab the number of groups
+        groupSize <- as.numeric(table(chat_object_per_timepoint_and_chem[[chem]][[timepoint]]@idents))
+        # grab the right slot
+        mat <- chat_object_per_timepoint_and_chem[[chem]][[timepoint]]@net[[slot]]
+        # make a perfect square of the plot
+        par(mfrow = c(ceiling(sqrt(nrow(mat))),ceiling(sqrt(nrow(mat)))), xpd=TRUE)
+        # make the plots
+        for (i in 1:nrow(mat)) {
+          mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames = dimnames(mat))
+          mat2[i, ] <- mat[i, ]
+          netVisual_circle(mat2, vertex.weight = groupSize, weight.scale = T, edge.weight.max = max(mat), title.name = paste(rownames(mat)[i], 'in', chem, timepoint))
+        }
+      })
+      dev.off()
+    }
+  }
+  par(mfrow=c(1,1))
+}
+
+plot_all_communications_networks <- function(chat_object_per_timepoint_and_chem, output_loc='', file_type='pdf', chems=c('V2', 'V3'), width=10, height=10){
+  # plot each timepoint
+  for(timepoint in names(chat_object_per_timepoint_and_chem[[chems[[1]]]])){
+    # paste the full output loc
+    output_loc_full <- paste(output_loc, 'communications_', timepoint, '.', file_type, sep = '')
+    print(output_loc_full)
+    # init where we will save
+    if(file_type == 'pdf'){
+      pdf(output_loc_full, width = width, height = height)
+    }
+    else if(file_type == 'png'){
+      png(output_loc_full, width = width, height = height)
+    }
+    else{
+      print('unknown file type, doing pdf instead')
+      pdf(output_loc_full, width = width, height = height)
+    }
+    try({
+      # plot each chem
+      for(chem in chems){
+        groupSize <- as.numeric(table(chat_object_per_timepoint_and_chem[[chem]][[timepoint]]@idents))
+        netVisual_circle(chat_object_per_timepoint_and_chem[[chem]][[timepoint]]@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = paste("Number of interactions", 'in', chem, timepoint))
+        netVisual_circle(chat_object_per_timepoint_and_chem[[chem]][[timepoint]]@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = paste("Interaction weights/strength", 'in', chem, timepoint))
+      }
+    })
+    dev.off()
+  }
+}
+
+plot_all_aggregate_pathways <- function(chat_object_per_timepoint_and_chem, output_loc='', file_type='pdf', chems=c('V2', 'V3'), width=10, height=10){
+  # plot each timepoint
+  for(timepoint in names(chat_object_per_timepoint_and_chem[[chems[[1]]]])){
+    # plot each chem
+    for(chem in chems){
+      # paste the full output loc
+      output_loc_full <- paste(output_loc, 'pathways_', timepoint, '_', chem, '.', file_type, sep = '')
+      print(output_loc_full)
+      # init where we will save
+      if(file_type == 'pdf'){
+        pdf(output_loc_full, width = width, height = height)
+      }
+      else if(file_type == 'png'){
+        png(output_loc_full, width = width, height = height)
+      }
+      else{
+        print('unknown file type, doing pdf instead')
+        pdf(output_loc_full, width = width, height = height)
+      }
+      try({
+        par(mfrow=c(3,2))
+        for(pathway in chat_object_per_timepoint_and_chem[[chem]][[timepoint]]@netP$pathways){
+          netVisual_aggregate(chat_object_per_timepoint_and_chem[[chem]][[timepoint]], signaling = c(pathway), layout = "circle")
+        }
+      })
+      dev.off()
+    }
+  }
+}
+
+compare_conditions <- function(all_conditions_list, condition.1, condition.2){
+  # subset to only the conditions we want
+  conditions.list <- list(condition.1 = all_conditions_list[[condition.1]], condition.2 = all_conditions_list[[condition.2]])
+  conditions <- mergeCellChat(conditions.list, add.names = names(conditions.list))
+  # compare interactions and strength numbers
+  gg1 <- compareInteractions(conditions, show.legend = F, group = c(1,2))
+  gg2 <- compareInteractions(conditions, show.legend = F, group = c(1,2), measure = "weight")
+  # check strengths and weights as circle plots
+  #gg3 <- plot(netVisual_diffInteraction(conditions, weight.scale = T))
+  #gg4 <- plot(netVisual_diffInteraction(conditions, weight.scale = T, measure = "weight"))
+  # check strengths and weights as heatmaps
+  gg5 <- netVisual_heatmap(conditions)
+  gg6 <- netVisual_heatmap(conditions, measure = "weight")
+  # compute net neutrality score to show differences
+  conditions.list[[1]] <- netAnalysis_computeCentrality(conditions.list[[1]])
+  conditions.list[[2]] <- netAnalysis_computeCentrality(conditions.list[[2]])
+  # visualize in 2d space, #first get the number of links in both sets
+  conditions.list.num.link <- sapply(conditions.list, function(x) {rowSums(x@net$count) + colSums(x@net$count)-diag(x@net$count)})
+  # set a max and min, so the plots will have the same scale
+  conditions.list.weight.MinMax <- c(min(conditions.list.num.link), max(conditions.list.num.link))
+  # make the plots
+  gg7 <- netAnalysis_signalingRole_scatter(conditions.list[[1]], title = names(conditions.list)[1], weight.MinMax = conditions.list.weight.MinMax)
+  gg8 <- netAnalysis_signalingRole_scatter(conditions.list[[2]], title = names(conditions.list)[2], weight.MinMax = conditions.list.weight.MinMax)
+  # identify signalling groups based on structure similarity
+  conditions <- computeNetSimilarityPairwise(conditions, type = "functional")
+  # Compute signaling network similarity for datasets 1 2
+  conditions <- netEmbedding(conditions, type = "functional")
+  # Manifold learning of the signaling networks for datasets 1 2
+  conditions <- netClustering(conditions, type = "functional")
+  # Visualization in 2D-space
+  gg9 <- netVisual_embeddingPairwise(conditions, type = "functional", label.size = 3.5)
+  # same, but on structure similarity this time
+  conditions <- computeNetSimilarityPairwise(conditions, type = "structural")
+  conditions <- netEmbedding(conditions, type = "structural")
+  conditions <- netClustering(conditions, type = "structural")
+  gg10 <- netVisual_embeddingPairwise(conditions, type = "structural", label.size = 3.5)
+  # put everything in a nice list
+  all_plots <- list('interactions_number' = gg1,
+                    'interactions_weight' = gg2,
+                    #'circle_number' = gg3,
+                    #'circle_weight' = gg4,
+                    'heatmap_number' = gg5,
+                    'heatmap_weight' = gg6,
+                    'scatter_cond1' = gg7,
+                    'scatter_cond2' = gg8,
+                    'clust_functional' = gg9,
+                    'clust_structural' = gg10)
+  return(all_plots)
+}
+
+do_compare_conditions <- function(all_conditions_list, condition.1, condition.2){
+  # subset to only the conditions we want
+  conditions.list <- list(condition.1 = all_conditions_list[[condition.1]], condition.2 = all_conditions_list[[condition.2]])
+  conditions <- mergeCellChat(conditions.list, add.names = names(conditions.list))
+  # compute net neutrality score to show differences
+  conditions.list[[1]] <- netAnalysis_computeCentrality(conditions.list[[1]])
+  conditions.list[[2]] <- netAnalysis_computeCentrality(conditions.list[[2]])
+  # identify signalling groups based on structure similarity
+  conditions <- computeNetSimilarityPairwise(conditions, type = "functional")
+  # Compute signaling network similarity for datasets 1 2
+  conditions <- netEmbedding(conditions, type = "functional")
+  # Manifold learning of the signaling networks for datasets 1 2
+  conditions <- netClustering(conditions, type = "functional")
+  # Visualization in 2D-space
+  conditions <- computeNetSimilarityPairwise(conditions, type = "structural")
+  conditions <- netEmbedding(conditions, type = "structural")
+  conditions <- netClustering(conditions, type = "structural")
+  return(conditions)
+}
+
+chat_result_to_plots <-function(chat_plots, output_loc){
+  # setup the output
+  pdf(output_loc)
+  #par(mfrow = c(1,2))
+  #chat_plots[['circle_number']]
+  #chat_plots[['circle_weight']]
+  print(
+    ggarrange(
+      plotlist = list(
+        chat_plots[['interactions_number']], 
+        chat_plots[['interactions_weight']] 
+      ), ncol = 1, nrow = 2
+    )
+  )
+  print(chat_plots[['heatmap_number']] + chat_plots[['heatmap_weight']])
+  print(
+    ggarrange(
+      plotlist = list(
+        chat_plots[['scatter_cond1']], 
+        chat_plots[['scatter_cond2']], 
+        chat_plots[['clust_functional']], 
+        chat_plots[['clust_structural']]
+      ), ncol = 2, nrow = 2
+    )
+  )
+  dev.off()
+  # back to default
+}
+
+
+```
+
+## Cellchat Analysis
+```{r main code, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#read the seurat object
+merged <- readRDS('/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/seurat_preprocess_samples/objects/vedo2_remerged_resct_20230215.rds')
+
+# select the final celltypes
+merged@meta.data$celltype_final.v1 <- merged@meta.data$celltype_final
+merged@meta.data[merged@meta.data$celltype_final.v1 %in% c('DC1', 'DC2'), 'celltype_final.v1']  <- 'DC'
+
+#list of cells we want to use for cellchat
+cell.list <- c('Inflammatory Monocytes', 'CD8+ IL17+', 'Inflammatory Fibroblasts', 'DC', 'Post-capillary Venules', 'ILCs', 'NKs', 'IgG', 'M cells', 'Tregs')
+
+# use only our major cell types
+merged.sub <- merged[ , merged@meta.data$celltype_final.v1 %in% cell.list]
+
+#create a new column in the metadata
+merged.sub$condition <- paste(merged.sub$timepoint, merged.sub$PGA._resp, sep = '_')
+
+# T0 R
+# subset to specific condition T0 responders
+merged.sub.t0.R <- merged.sub[, merged.sub@meta.data$condition == 'T0_yes']
+# create cell type
+merged.sub.t0.R.chat <- init_cellchat_object(merged.sub.t0.R)
+merged.sub.t0.R.chat <- preprocess_cellchat_object(merged.sub.t0.R.chat)
+merged.sub.t0.R.chat <- inference_communication_network(merged.sub.t0.R.chat)
+
+# Extract significant ligands_receptors pairs
+df.net.R <- subsetCommunication(merged.sub.t0.R.chat)
+
+# Sort dataframe
+df.net.R <- df.net.R[order(df.net.R$source),]
+df.net.R <- df.net.R[order(df.net.R$target),]
+
+# save the file
+write.csv(df.net.R, "/Users/s.qs/Desktop/T0R_L_R_pairs.csv")
+
+# save the CellChat object
+saveRDS(vedo2_biopsy.sub.t0.R.chat, file = "/Users/s.qs/Desktop/cellchat_vedo2_biopsy_sub_T0_R.rds")
+
+
+
+################################################################################
+
+
+#same for NR
+# T0 NR
+
+# subset to specific condition T0 non-responders
+merged.sub.t0.NR <- merged.sub[, merged.sub@meta.data$condition == 'T0_no']
+# create cell type
+merged.sub.t0.NR.chat <- init_cellchat_object(merged.sub.t0.NR)
+merged.sub.t0.NR.chat <- preprocess_cellchat_object(merged.sub.t0.NR.chat)
+merged.sub.t0.NR.chat <- inference_communication_network(merged.sub.t0.NR.chat)
+
+# Extract significant ligands_receptors pairs
+df.net.NR <- subsetCommunication(merged.sub.t0.NR.chat)
+
+# Sort dataframe
+df.net.NR <- df.net.R[order(df.net.NR$source),]
+df.net.NR <- df.net.R[order(df.net.NR$target),]
+
+# save the file
+write.csv(df.net.NR, "/Users/s.qs/Desktop/T0NR_L_R_pairs.csv")
+
+# save the CellChat object
+saveRDS(vedo2_biopsy.sub.t0.NR.chat, file = "/Users/s.qs/Desktop/cellchat_vedo2_biopsy_sub_T0_NR.rds")
+
+```
+
+

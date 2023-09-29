@@ -25,29 +25,23 @@ External tools used were:
 - Cellchat v.1.4.0: http://www.cellchat.org/
 - nichenetr v.1.1.0: https://github.com/saeyslab/nichenetr/blob/master/vignettes/seurat_steps.md
 
-
-the content for each step includes:
-
--   Alignment of the sequence data to the GRCh38 reference Human Genome
--   Demultiplexing, doublet_detection, and quality control (QC) 
--   General quality control and filtering
--   Normalization and data integration
--   Dimensional reduction and clustering
--   Cell type classification
--   Expression of integrins
--   Cell abundances analysis
--   Differential gene expression analysis and pathway analysis
--   Cell-cell interaction analysis
-
 # Workflow
+the content for each step includes these steps in this order:
 
-steps should be done in this order, to replicate the results
+-   Alignment of the sequence data to the GRCh38 reference Human Genome: https://github.com/WeersmaLabIBD/Response_to_vedolizumab_in_UC/tree/main/1_Alignment
+-   Lane integration: https://github.com/WeersmaLabIBD/Response_to_vedolizumab_in_UC/tree/main/2_Lane_integration
+-   Demultiplexing, doublet_detection, and quality control (QC): https://github.com/WeersmaLabIBD/Response_to_vedolizumab_in_UC/tree/main/3_Demultiplexing_and_doublet_detection
+-   General quality control and filtering: https://github.com/WeersmaLabIBD/Response_to_vedolizumab_in_UC/tree/main/4_Preprocessing_and_celltype_annotation
+-   Normalization and data integration: https://github.com/WeersmaLabIBD/Response_to_vedolizumab_in_UC/tree/main/4_Preprocessing_and_celltype_annotation
+-   Dimensional reduction and clustering: https://github.com/WeersmaLabIBD/Response_to_vedolizumab_in_UC/tree/main/4_Preprocessing_and_celltype_annotation
+-   Cell type classification: https://github.com/WeersmaLabIBD/Response_to_vedolizumab_in_UC/tree/main/4_Preprocessing_and_celltype_annotation
+-   Expression of integrins: https://github.com/WeersmaLabIBD/Response_to_vedolizumab_in_UC/tree/main/5_integrin_expression
+-   Cell abundances analysis: https://github.com/WeersmaLabIBD/Response_to_vedolizumab_in_UC/tree/main/6_Cell_abundances_analysis
+-   Differential gene expression analysis and pathway analysis: https://github.com/WeersmaLabIBD/Response_to_vedolizumab_in_UC/tree/main/7_Differential_expression_analysis_and_Pathway
+-   Cell-cell interaction analysis: https://github.com/WeersmaLabIBD/Response_to_vedolizumab_in_UC/tree/main/8_Cell2Cell_communication_analysis
 
-## Alignment of the sequence data to the GRCh38 reference Human Genome
 
-The 1_Alignment contains the script 'Cellranger_script' which would create jobs to run each 10x lane through CellRanger.
-
-## Hardware
+# Hardware
 
 Analyses were performed on either a 2021 MacBook Pro (32GB), the Gearshift cluster http://docs.gcc.rug.nl/gearshift/cluster/ 
 

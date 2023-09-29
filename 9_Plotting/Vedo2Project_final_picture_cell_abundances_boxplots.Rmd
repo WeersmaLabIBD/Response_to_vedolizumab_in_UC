@@ -1,0 +1,130 @@
+---
+title: "Vedo2Project final pictures boxplot cell abundances"
+author: "Paola Pibiri"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+############################################################################################################################
+# Authors: Paola Pibiri
+# Name: Vedo2Project_final_picture_cell_abundances_boxplots.Rmd
+# Function: create the final pictures used in the manuscript for the boxplot representation of the cell abundances  
+############################################################################################################################
+
+```
+
+
+
+```{r libraries, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#######################################
+# Libraries                           #
+#######################################
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+library(compositions)
+library(nichenetr)
+
+```
+
+
+## Boxplot Cell abundances 
+```{r main code, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# read counts in level 2 (input file used for proportion analysis, with celltype counts in the columns, and additional columns for conditions, see R file called Vedo2Project_final_picture_cell_abundances_boxplots)
+countsR <- read.table("/Users/paolapibiri/Desktop/Vedo2/Vedo2_biopsy_batch1_2/Compositional_analyses/inputs/vedo2_batch12_counts_R_10_v1.csv", sep= ',', header = T, row.names=1, check.names = F)
+countsNR <- read.table("/Users/paolapibiri/Desktop/Vedo2/Vedo2_biopsy_batch1_2/Compositional_analyses/inputs/vedo2_batch12_counts_NR_10_v1.csv", sep= ',', header = T, row.names=1, check.names = F)
+
+# calculate counts in Responders 
+countsR2 <- countsR
+timepointR <- countsR2[,c('timepoint')]
+countsR2 <- countsR2[, setdiff(colnames(countsR2), c('timepoint'))]
+
+# calculate proportions
+total_rowR = apply(countsR2, 1, sum)
+pctsR = lapply(countsR2, function(x) {
+  x/total_rowR
+  
+  #if you prefer to have the log transformed data 
+  #-log(x / total_rowR)
+  
+})
+
+frequenciesR = as.data.frame(pctsR)
+
+#If you prefer to use clr transofrmed data
+#frequenciesR = as.data.frame(clr(countsR2))
+
+frequenciesR2 <- frequenciesR
+frequenciesR2[['timepoint']] <- timepointR
+frequenciesR2 <- frequenciesR2[order(frequenciesR2$timepoint, decreasing = TRUE),]
+
+#create a new column indicating that this table is for responders
+frequenciesR2[['response']] <- 'R'
+
+
+# calculate counts in Non Responders 
+countsNR2 <- countsNR
+timepointNR <- countsNR2[,c('timepoint')]
+countsNR2 <- countsNR2[, setdiff(colnames(countsR2), c('timepoint'))]
+# calculate proportions
+total_rowNR = apply(countsNR2, 1, sum)
+pctsNR = lapply(countsNR2, function(x) {
+  x / total_rowNR
+  
+  #if you prefer to have the log transformed data 
+  #-log(x / total_rowNR)
+ 
+})
+
+frequenciesNR = as.data.frame(pctsNR)
+
+#If you prefer to use clr transofrmed data
+#frequenciesNR = as.data.frame(clr(countsNR2))
+
+frequenciesNR2 <- frequenciesNR
+frequenciesNR2[['timepoint']] <- timepointNR
+frequenciesNR2 <- frequenciesNR2[order(frequenciesNR2$timepoint, decreasing = TRUE),]
+
+#create a new column indicating that this table is for responders
+frequenciesNR2[['response']] <- 'NR'
+
+
+#merge the 2 frequencies in 1 df
+df <- rbind(frequenciesR2, frequenciesNR2)
+df[['condition']] <- paste0(df[['response']], '-', df[['timepoint']])
+
+
+# Plot
+df1 =  melt(df)
+
+df1[['timepoint']] <- NULL
+df1[['response']] <- NULL
+
+
+colnames(df1) <- c('condition', 'celltype', 'proportion')
+df1$condition <- factor(df1$condition, levels = c("R-T0", "R-T4", "NR-T0", "NR-T4"))
+
+
+ggplot(df1, aes(x=condition, y=proportion, fill=condition)) + 
+  geom_boxplot(outlier.shape = NA)+
+  geom_jitter(size = 0.8, width = 0.15, alpha = 0.5) +
+  stat_summary(fun.y=mean, geom="point", shape=20, size=14, color="red", fill="red") +
+  facet_wrap( ~ celltype, scales="free") +
+  theme(panel.background = element_rect(fill = 'white', color='black')) +
+  theme(strip.background = element_rect(fill="white"),
+        strip.text = element_text(colour="black"), panel.grid.major = element_line(size = 0.5, linetype = 'solid',
+                                                                                   colour = "white")) +
+
+  scale_fill_manual(values = list('R-T0' = 'white', 'R-T4' = 'white', 'NR-T0' = 'gray', 'NR-T4' = 'gray'))
+
+
+
+
+```
+
+

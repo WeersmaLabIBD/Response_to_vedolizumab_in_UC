@@ -1,0 +1,198 @@
+---
+title: "Final pictures umap and volcano plots"
+author: "Paola Pibiri"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+############################################################################################################################
+# Authors: Paola Pibiri
+# Name: Vedo2Project_final_pictures_umap_volcano_plot.Rmd
+# Function: create the final umap and volcano plots used in the manuscript
+############################################################################################################################
+
+```
+
+
+```{r libraries, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+####################
+# libraries        #
+####################
+
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+library(Seurat)
+library(ggrepel)
+```
+
+
+```{r functions, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+####################
+# Functions        #
+####################
+
+# perform MAST as implemented in Seurat
+perform_seurat_mast <- function(seurat_object, identity_column, ident.1, ident.2, min.pct=0.1, assay='RNA', slot='data', features=NULL, logfc_threshold=0){
+  # set the identity for the Seurat object
+  Idents(seurat_object) <- identity_column
+  # set the assay
+  DefaultAssay(seurat_object) <- assay
+  # perform MAST
+  mast_result <- FindMarkers(seurat_object, ident.1 = ident.1, ident.2 = ident.2, test.use = 'MAST', assay='RNA', min.pct = min.pct, slot = slot, features = features, logfc.threshold = logfc_threshold)
+  return(mast_result)
+}
+
+# perform MAST as implemented in Seurat, for each cell type
+perform_seurat_mast_per_celltype <- function(seurat_object, identity_column, ident.1, ident.2, mast_output_loc, cell_type_column='predicted.cell_type.pred2', cell_types_to_consider=NULL, min.pct=0.1, assay='SCT', slot='data', features=NULL, logfc_threshold=0.25){
+  # check if the mast output loc exists
+  if(!dir.exists(mast_output_loc)){
+    # create the directory if not
+    dir.create(mast_output_loc, recursive = T)
+  }
+  # check the overlapping cell types
+  cell_types <- unique(seurat_object@meta.data[[cell_type_column]])
+  if(!is.null(cell_types_to_consider)){
+    cell_types <- intersect(cell_types, cell_types_to_consider)
+  }
+  # check each cell type
+  for(cell_type in cell_types){
+    # get a safe file name
+    cell_type_safe <- gsub(' |/', '_', cell_type)
+    cell_type_safe <- gsub('-', '_negative', cell_type_safe)
+    cell_type_safe <- gsub('\\+', '_positive', cell_type_safe)
+    cell_type_safe <- gsub('\\)', '', cell_type_safe)
+    cell_type_safe <- gsub('\\(', '', cell_type_safe)
+    # paste together the output location
+    #full_output_loc <- paste(mast_output_loc, cell_type_safe, '_', ident.1, '_vs_', ident.2, '.tsv', sep = '')
+    full_output_loc <- paste(mast_output_loc, cell_type_safe, '.tsv', sep = '')
+    # subset to the cell type
+    seurat_object_celltype <- seurat_object[, seurat_object@meta.data[[cell_type_column]] == cell_type]
+    # try to do the differential expression (might fail if too few cells)
+    tryCatch(
+      {
+        # perform the analysis
+        mast_result <- perform_seurat_mast(seurat_object_celltype, identity_column, ident.1, ident.2, min.pct, assay, slot = slot, features = features, logfc_threshold = logfc_threshold)
+        # add our only mtc if features were selected. Seurat does Bonferroni correction by multiplying the nominal P-value by the number of genes. when we select the genes to test, this is incorrect.
+        if (!is.null(features) & length(features) > 0) {
+          mast_result[['bonferroni']] <- p.adjust(mast_result[['p_val']], method = 'bonferroni')
+          mast_result[['BH']] <- p.adjust(mast_result[['p_val']], method = 'BH')
+        }
+        # write the result
+        write.table(mast_result, full_output_loc, sep = '\t', row.names = T, col.names = T)
+      },
+      error=function(cond) {
+        # print why we fail
+        print(paste('DE failed for', cell_type, ident.1, 'vs', ident.2, ':', cond))
+      }
+    )
+  }
+}
+```
+
+## UMAP per celltype
+```{r umap responders vs non responders at t0, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#read the object
+vedo2 <- readRDS('/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/seurat_preprocess_samples/objects/vedo2_remerged_resct_20230215.rds')
+
+#subset the object to have only timepoint=T0, celltype = inflammatory monocyes and NKs
+celltype <- 'Tregs'
+obj <- vedo2[ ,vedo2@meta.data$celltype_final == celltype & vedo2@meta.data$timepoint == 'T0']
+
+#run all the preprocessing
+obj<- RunPCA(obj)
+obj <- RunUMAP(obj, dims = 1:30)
+obj<-FindNeighbors(obj, dims = 1:30)
+obj<-FindClusters(obj, resolution = 1.2)
+
+#UMAP final picture
+vedo2_plot <- DimPlot(obj, group.by = 'PGA._resp', reduction = 'umap', cols = list('yes' = 'darkturquoise', 'no' = 'orchid'))
+
+```
+
+## Volcano Plot
+```{r volcano plots, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# DE input per celltype containing all the genes (no filtering p<0.05) 
+input.dir <- '/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/Monocytes_DE_pathway/biopsy/Inflammatory_Monocytes_all_genes.tsv'
+out.dir <- '/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/Monocytes_DE_pathway/biopsy/'
+
+#read the file of DE genes 
+data <- read.table(input.dir, 
+                   sep='\t', 
+                   header = T)
+
+
+#First input for regular Volcano Plot
+#modify the data for creating a column for division in upregulated, downreulated and not significant genes 
+data <- data %>% 
+  mutate(
+    Expression = case_when(avg_log2FC >= 0.25 & p_val_adj < 0.05 ~ "Up-regulated",
+                           avg_log2FC <= -0.25 & p_val_adj < 0.05 ~ "Down-regulated",
+                           p_val_adj >= 0.05 ~ "Not-significant",
+                           avg_log2FC < 0.25 ~ "Not-significant",
+                           avg_log2FC > -0.25 ~ "Not-significant",
+                           
+    )
+  )
+
+#Add these parameters for second Volcano Plot (with the top 20 genes up and down)
+# provide for upregulated and downregulated ones the most significant ones 
+top <- 20
+top_genes <- bind_rows(
+  data %>% 
+    filter(Expression == 'Up-regulated') %>% 
+    arrange(p_val_adj, desc(abs(avg_log2FC))) %>% 
+    head(top),
+  data %>% 
+    filter(Expression == 'Down-regulated') %>% 
+    arrange(p_val_adj, desc(abs(avg_log2FC))) %>% 
+    head(top)
+)
+
+#rename the rownames and indicate them as Genes column
+top_genes$Genes <- rownames(top_genes)
+
+#create a table indicating the most significant genes 
+write.table(top_genes, paste0(out.dir, 'inf_mono_biospy_volcano_plot_top40.tsv'), col.names = T, row.names = T, sep='\t')
+
+# skip the parameter for Volcano plot2 and use these for volcano plot for specific labels 
+data$Genes <- rownames(data)
+data2 <- data[data$Genes %in% c('LGALS3', 'LGALS1'), ]
+
+
+
+######
+
+
+#Volcano Plot1
+pp2 <- ggplot(data, aes(avg_log2FC, -log(p_val_adj,10))) +
+  geom_point(aes(color = Expression), size = 0.8) +
+  xlab(expression("log"[2]*"FC")) + 
+  ylab(expression("-log"[10]*"FDR")) +
+  xlim(c(-2, 2)) +
+  scale_color_manual(values = c("darkturquoise", "gray50", "orchid")) +
+  guides(colour = guide_legend(override.aes = list(size=1.5)))
+
+
+
+# Volcano Plot2 + most significant 20 genes
+pp2 + geom_label_repel(data = top_genes,
+                       mapping = aes(avg_log2FC, -log(p_val_adj,10), label = Genes),
+                       size = 2) +  theme(legend.position="none")
+
+
+# Volcano plot3 + LGAL genes 
+
+pp2 + geom_label_repel(data = data2,
+                       mapping = aes(avg_log2FC, -log(p_val_adj,10), label = Genes),
+                       size = 2) +  theme(legend.position="none")
+
+```

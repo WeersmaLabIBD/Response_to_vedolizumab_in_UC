@@ -1,0 +1,392 @@
+---
+title: "Vedo2 UMAP and Stackbar"
+author: "Roy Oelen, Paola Pibiri"
+date: "2022-10-27"
+output: html_document
+---
+
+```{r header, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#!/usr/bin/env Rscript
+############################################################################################################################
+# Authors: Roy Oelen, Paola Pibiri
+# Name: Vedo2Project_final_UMAP_and_cell_abundances_figures.Rmd
+# Function: plot the cell types
+############################################################################################################################
+
+```
+
+```{r libraries, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+####################
+# libraries        #
+####################
+
+library(Seurat)
+library(ggplot2)
+library(cowplot)
+
+```
+
+```{r functions, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+####################
+# Functions        #
+####################
+
+make_celltypes_safe <- function(cell_types){
+  # get a safe file name
+  cell_type_safes <- gsub(' |/', '_', cell_types)
+  cell_type_safes <- gsub('-', '_negative', cell_type_safes)
+  cell_type_safes <- gsub('\\+', '_positive', cell_type_safes)
+  cell_type_safes <- gsub('\\)', '', cell_type_safes)
+  cell_type_safes <- gsub('\\(', '', cell_type_safes)
+  return(cell_type_safes)
+}
+
+
+add_lower_classification <- function(seurat_object, reclassification_mapping, mapping_original_column, mapping_reclass_column, metadata_original_column, metadata_reclassification_column){
+  # add the new column
+  seurat_object@meta.data[[metadata_reclassification_column]] <- NA
+  # get each cell type in the data
+  metadata_original_cts <- unique(seurat_object@meta.data[[metadata_original_column]])
+  # and the originals in the mapping
+  reclassification_original_cts <- unique(reclassification_mapping[[mapping_original_column]])
+  # we can only map what is present in both
+  originals_both <- intersect(metadata_original_cts, reclassification_original_cts)
+  # check what is missing
+  only_metadata <- setdiff(metadata_original_cts, reclassification_original_cts)
+  only_mapping <- setdiff(reclassification_original_cts, metadata_original_cts)
+  # warn what is missing
+  if(length(only_metadata) > 0){
+    print('some celltypes only in metadata')
+    print(only_metadata)
+  }
+  if(length(only_mapping) > 0){
+    print('some celltypes only in remapping ')
+    print(only_mapping)
+  }
+  # check each cell type
+  for(celltype_original in originals_both){
+    # get the appropriate remapping
+    celltype_remapped <- reclassification_mapping[reclassification_mapping[[mapping_original_column]] == celltype_original, mapping_reclass_column]
+    # now remap in the metadata
+    seurat_object@meta.data[seurat_object@meta.data[[metadata_original_column]] == celltype_original, metadata_reclassification_column] <- celltype_remapped
+  }
+  return(seurat_object)
+}
+
+
+get_color_coding_dict <- function(){
+  color_coding <- list()
+  # set the cell type colors for immune
+  color_coding[["Epithelial"]] <- "#A60823"
+  color_coding[["Early_epithelial"]] <- "#ED4A18"
+  color_coding[["Plasma_cells"]] <- "#06A2D6"
+  color_coding[["T_cells"]] <- "#325ADB"
+  color_coding[["B_cells"]] <- "#0ECAE3"
+  color_coding[["DCs"]] <- "#C586F7"
+  color_coding[["Monocytes"]] <- "#5A018A"
+  color_coding[["ILCs"]] <- "#060261"
+  color_coding[["NKs"]] <- "#0532AD"
+  color_coding[["Mast"]] <- "#4C0DBF"
+  color_coding[["Endothelial"]] <- "#32E379"
+  color_coding[["Glia"]] <- "#099E45"
+  color_coding[["Fibroblasts"]] <- "#025C26"
+  # groupings
+  color_coding[['no_T0']] <- '#E3936B'
+  color_coding[['no_T4']] <- '#E0692D'
+  color_coding[['yes_T0']] <- '#1863F0'
+  color_coding[['yes_T4']] <- '#03389C'
+  color_coding[['T0_no']] <- '#E3936B'
+  color_coding[['T4_no']] <- '#E0692D'
+  color_coding[['T0_yes']] <- '#1863F0'
+  color_coding[['T4_yes']] <- '#03389C'
+  return(color_coding)
+}
+
+
+coloured_dimplot <- function(object, group.by, ...){
+  # set colors based on condition
+  cc <- get_color_coding_dict()
+  #colScale <- scale_fill_manual(name = 'cell type', values = unlist(cc[object@meta.data[[group.by]]]))
+  # subset to the colours we have
+  colour_coding <- cc[intersect(names(cc), unique(object@meta.data[[group.by]]))]
+  # get the dimplot
+  p <- DimPlot(object = object, group.by = group.by, cols = colour_coding,...)
+  # add the colours
+  #p <- p + colScale
+  return(p)
+}
+
+# create a
+create_dimplot <- function(data, x, y, group.by, ...){
+  colour_coding <- get_color_coding_dict()
+  p <- ggplot(mapping = aes(x = data[[x]], y = data[[y]], col = data[[group.by]]), ...) +
+    geom_point(size = 0.1) +
+    ggtitle(group.by) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), strip.background = element_rect(colour="white", fill="white")) +
+    xlab(x) +
+    ylab(y) +
+    scale_color_manual(name = group.by, values = unlist(colour_coding[unique(data[[group.by]])]))
+
+  return(p)
+}
+
+
+get_nr_cells_per_group <- function(seurat_object, groups){
+  # get the numbers table
+  numbers_table <- data.frame(table(seurat_object@meta.data[, groups]))
+  return(numbers_table)
+}
+
+
+create_barplot_percentages <- function(numbers_table, number_column, stack_column, group_columns, stacks_to_plot=NULL){
+  # add a new column that has the groups
+  numbers_table[['group']] <- apply(numbers_table, 1, function(x){
+    # get the value of each column
+    group_parts <- rep(NA, times = length(group_columns))
+    for(i in 1:length(group_columns)){
+      group_parts[i] <- x[group_columns[i]]
+    }
+    # and paste it together
+    return(paste(group_parts, collapse = '_'))
+  })
+  # add a percentage
+  numbers_table[['group_pct']] <- apply(numbers_table, 1, function(x){
+    # get the group for this row
+    group <- x['group']
+    # and the number
+    number <- as.numeric(x[number_column])
+    # get the total of the group
+    group_total <- sum(as.numeric(numbers_table[numbers_table[['group']] == group, number_column]))
+    # calculate what percentage this entry makes up of the total
+    pct <- number / group_total
+    return(pct)
+  })
+  # subset if we don't want to plot all groups
+  if (!is.null(stacks_to_plot)) {
+    numbers_table <- numbers_table[numbers_table[[stack_column]] %in% stacks_to_plot, ]
+  }
+  # grab the colours
+  cc <- get_color_coding_dict()
+  # subset to what we have
+  colour_map <- cc[intersect(names(cc), numbers_table[[stack_column]])]
+  # make the fill
+  fillScale <- scale_fill_manual(name = "cell type",values = colour_map)
+  # create the plot
+  p <- ggplot(data = numbers_table, mapping = aes(x = numbers_table[['group']], y = numbers_table[['group_pct']], fill = numbers_table[[stack_column]])) +
+    geom_bar(stat = 'identity', position = 'stack') +
+    fillScale +
+    xlab('group') +
+    ylab('fraction') +
+    theme(panel.border = element_rect(color="black", fill=NA, size=1.1), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), strip.background = element_rect(colour="white", fill="white"))
+  return(p)
+}
+
+
+
+get_average_expression_per_group <- function(seurat_object, groups, assay = 'SCT'){
+  # we will join them in a table
+  vertical_table <- NULL
+  # if we have more than one grouping variable, we have to recursively go deeper
+  if (length(groups) > 1){
+    # grab the last grouping variable
+    group_to_check <- groups[length(groups)]
+    # check for each variable in the group
+    for (group in unique(seurat_object@meta.data[[group_to_check]])){
+      # subset to that group
+      seurat_object_group <- seurat_object[, seurat_object@meta.data[[group_to_check]] == group]
+      # get the average expression for the group
+      table_identity <- get_average_expression_per_group(seurat_object_group, groups = groups[1:(length(groups) - 1)], assay = assay)
+      # add the group as a column
+      table_identity[[group_to_check]] <- group
+      # add to the total table
+      if (!is.null(vertical_table)) {
+        vertical_table <- rbind(vertical_table, table_identity)
+      }
+      else{
+        vertical_table <- table_identity
+      }
+    }
+  }
+  # if we have only one group, we can use average expression
+  else{
+    # get the average expression per group
+    average_expression <- data.frame(AverageExpression(seurat_object, assays = c(assay), group.by = groups[1])[[assay]])
+    # check each identity
+    for (identity in colnames(average_expression)) {
+      table_identity <- data.frame(gene = rownames(average_expression), expression = average_expression[[identity]])
+      # add the identity
+      table_identity[[groups[1]]] <- identity
+      # add to the total table
+      if (!is.null(vertical_table)) {
+        vertical_table <- rbind(vertical_table, table_identity)
+      }
+      else{
+        vertical_table <- table_identity
+      }
+    }
+  }
+  return(vertical_table)
+}
+
+
+create_expression_plot <- function(average_expression, gene, group_columns){
+  # subset to that gene
+  average_expression_gene <- average_expression[average_expression[['gene']] == gene, ]
+
+  # add a new column that has the groups
+  average_expression_gene[['group']] <- apply(average_expression_gene, 1, function(x){
+    # get the value of each column
+    group_parts <- rep(NA, times = length(group_columns))
+    for(i in 1:length(group_columns)){
+      group_parts[i] <- x[group_columns[i]]
+    }
+    # and paste it together
+    return(paste(group_parts, collapse = '_'))
+  })
+  # grab the colours
+  cc <- get_color_coding_dict()
+  # subset to what we have
+  colour_map <- cc[intersect(names(cc), unique(average_expression_gene[['group']]))]
+  # make the fill
+  fillScale <- scale_fill_manual(name = "condition",values = colour_map)
+  # now make the plot
+  p <- ggplot(mapping = aes(x = average_expression_gene[['group']], y = average_expression_gene[['expression']], fill = average_expression_gene[['group']])) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(size = 2, alpha = 0.5) +
+    xlab('group') +
+    ylab(paste(gene, 'expression')) +
+    ggtitle(paste('expression of ', gene)) +
+    fillScale +
+    theme(panel.border = element_rect(color="black", fill=NA, size=1.1), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), strip.background = element_rect(colour="white", fill="white"))
+  return(p)
+}
+
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+####################
+# Main Code        #
+####################
+
+objects_loc <- '/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/cell_type_classification/objects/'
+vedo2_loc <- paste(objects_loc, 'vedo2_102022_ecco.rds', sep = '')
+
+```
+
+```{r read, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+# read the object
+vedo2 <- readRDS(vedo2_loc)
+
+```
+
+```{r dimplot, include=TRUE, fig.width=5, fig.height=5}
+
+# read the object
+coloured_dimplot(vedo2, group.by = 'celltype_ecco') + NoLegend()
+```
+
+```{r cellnumbers, include=TRUE, fig.width=6, fig.height=4}
+
+# get the numbers per status
+cell_numbers <- get_nr_cells_per_group(vedo2, c('celltype_ecco', 'PGA._resp', 'timepoint'))
+cell_numbers_innate <- cell_numbers[cell_numbers[['celltype_ecco']] %in% c('NKs', 'ILCs', 'DCs', 'Monocytes', 'Mast') , ]
+cell_numbers_adaptive <- cell_numbers[cell_numbers[['celltype_ecco']] %in% c('Plasma_cells', 'B_cells', 'T_cells') , ]
+cell_numbers_epitheleal <- cell_numbers[cell_numbers[['celltype_ecco']] %in% c('Early_epithelial', 'Epithelial') , ]
+cell_numbers_stromal <- cell_numbers[cell_numbers[['celltype_ecco']] %in% c('Endothelial', 'Fibroblasts', 'Glia') , ]
+
+# create plots with complete legend on the side
+plot_grid(
+  create_barplot_percentages(cell_numbers_innate, number_column = 'Freq', 'celltype_ecco', c('PGA._resp', 'timepoint')) + ggtitle('innate immunity') + xlab('condition') + NoLegend(),
+  create_barplot_percentages(cell_numbers_adaptive, number_column = 'Freq', 'celltype_ecco', c('PGA._resp', 'timepoint'))+ ggtitle('adaptive immunity') + xlab('condition') + NoLegend(),
+  get_legend(create_barplot_percentages(cell_numbers, number_column = 'Freq', 'celltype_ecco', c('PGA._resp', 'timepoint')) + guides(fill=guide_legend(ncol=2))),
+  create_barplot_percentages(cell_numbers_epitheleal, number_column = 'Freq', 'celltype_ecco', c('PGA._resp', 'timepoint')) + xlab('condition') + ggtitle('epithelial') + NoLegend(),
+  create_barplot_percentages(cell_numbers_stromal, number_column = 'Freq', 'celltype_ecco', c('PGA._resp', 'timepoint')) + ggtitle('stromal') + xlab('condition') + NoLegend(),
+  nrow = 2,
+  ncol = 3
+)
+# create plots with legend on of relevant cell types attached
+plot_grid(
+  create_barplot_percentages(cell_numbers_innate, number_column = 'Freq', 'celltype_ecco', c('PGA._resp', 'timepoint')) + xlab('condition') + ggtitle('innate immunity') ,
+  create_barplot_percentages(cell_numbers_adaptive, number_column = 'Freq', 'celltype_ecco', c('PGA._resp', 'timepoint')) + xlab('condition') + ggtitle('adaptive immunity'),
+  create_barplot_percentages(cell_numbers_epitheleal, number_column = 'Freq', 'celltype_ecco', c('PGA._resp', 'timepoint')) + xlab('condition') + ggtitle('epithelial'),
+  create_barplot_percentages(cell_numbers_stromal, number_column = 'Freq', 'celltype_ecco', c('PGA._resp', 'timepoint')) + xlab('condition') + ggtitle('stromal'),
+  nrow = 2,
+  ncol = 2
+)
+
+# try with the percentages over all compartments
+plot_grid(
+  create_barplot_percentages(cell_numbers, number_column = 'Freq', 'celltype_ecco', c('PGA._resp', 'timepoint'), stacks_to_plot = c('NKs', 'ILCs', 'DCs', 'Monocytes', 'Mast')) + ggtitle('innate immunity') + xlab('condition') + NoLegend(),
+  create_barplot_percentages(cell_numbers, number_column = 'Freq', 'celltype_ecco', c('PGA._resp', 'timepoint'), stacks_to_plot = c('Plasma_cells', 'B_cells', 'T_cells'))+ ggtitle('adaptive immunity') + xlab('condition') + NoLegend(),
+  get_legend(create_barplot_percentages(cell_numbers, number_column = 'Freq', 'celltype_ecco', c('PGA._resp', 'timepoint')) + guides(fill=guide_legend(ncol=2))),
+  create_barplot_percentages(cell_numbers, number_column = 'Freq', 'celltype_ecco', c('PGA._resp', 'timepoint'), stacks_to_plot = c('Early_epithelial', 'Epithelial')) + xlab('condition') + ggtitle('epithelial') + NoLegend(),
+  create_barplot_percentages(cell_numbers, number_column = 'Freq', 'celltype_ecco', c('PGA._resp', 'timepoint'), stacks_to_plot = c('Endothelial', 'Fibroblasts', 'Glia')) + ggtitle('stromal') + xlab('condition') + NoLegend(),
+  nrow = 2,
+  ncol = 3
+)
+```
+
+```{r average_expression, include=TRUE}
+
+# get the average expression
+average_expression_per_groups <- get_average_expression_per_group(vedo2, c('celltype_ecco', 'PGA._resp', 'timepoint', 'patient'))
+# now we want the CD4 and CD8 separately
+vedo2@meta.data[['cell_type_cd']] <- 'not_cd'
+vedo2@meta.data[vedo2@meta.data[['cell_type_final']] %in% c('CD4+ Activated Fos-hi', 'CD4+ Activated Fos-lo', 'CD4+ Memory', 'CD4+ PD1+'), 'cell_type_cd'] <- 'CD4'
+vedo2@meta.data[vedo2@meta.data[['cell_type_final']] %in% c('CD8+ IELs', 'CD8+ IL17+', 'CD8+ LP'), 'cell_type_cd'] <- 'CD8'
+# calculate it
+average_expression_per_groups_higher <- get_average_expression_per_group(vedo2, c('cell_type_cd', 'PGA._resp', 'timepoint', 'patient'))
+# now again, because we need the monocytes
+average_expression_per_groups_mono <- get_average_expression_per_group(vedo2, c('cell_type_final', 'PGA._resp', 'timepoint', 'patient'))
+```
+
+```{r plot_expression_T, include=TRUE, fig.width=8, fig.height=4}
+
+# create the expression plot, with the legend on the side
+plot_grid(
+  create_expression_plot(average_expression_per_groups[average_expression_per_groups[['celltype_ecco']] == 'T_cells', ], gene = 'ITGA4', group_columns = c('timepoint', 'PGA._resp')) + ggtitle('T cell') + xlab('condition') + NoLegend(),
+  create_expression_plot(average_expression_per_groups_higher[average_expression_per_groups_higher[['cell_type_cd']] == 'CD4', ], gene = 'ITGA4', group_columns = c('timepoint', 'PGA._resp')) + ggtitle('CD4+T cell') + xlab('condition') + NoLegend(),
+  create_expression_plot(average_expression_per_groups_higher[average_expression_per_groups_higher[['cell_type_cd']] == 'CD8', ], gene = 'ITGA4', group_columns = c('timepoint', 'PGA._resp')) + ggtitle('CD8+T cell') + xlab('condition') + NoLegend(),
+  get_legend(create_expression_plot(average_expression_per_groups_higher[average_expression_per_groups_higher[['cell_type_cd']] == 'CD8', ], gene = 'ITGA4', group_columns = c('timepoint', 'PGA._resp')) + guides(fill=guide_legend(ncol=1))),
+  create_expression_plot(average_expression_per_groups[average_expression_per_groups[['celltype_ecco']] == 'T_cells', ], gene = 'ITGA7', group_columns = c('timepoint', 'PGA._resp')) + ggtitle('T cell') + xlab('condition') + NoLegend(),
+  create_expression_plot(average_expression_per_groups_higher[average_expression_per_groups_higher[['cell_type_cd']] == 'CD4', ], gene = 'ITGA7', group_columns = c('timepoint', 'PGA._resp')) + ggtitle('CD4+T cell') + xlab('condition') + NoLegend(),
+  create_expression_plot(average_expression_per_groups_higher[average_expression_per_groups_higher[['cell_type_cd']] == 'CD8', ], gene = 'ITGA7', group_columns = c('timepoint', 'PGA._resp')) + ggtitle('CD8+T cell') + xlab('condition') + NoLegend(),
+  nrow = 2,
+  ncol = 4
+)
+
+# create the plots with the legend attached (uglier)
+plot_grid(
+  create_expression_plot(average_expression_per_groups[average_expression_per_groups[['celltype_ecco']] == 'T_cells', ], gene = 'ITGA4', group_columns = c('timepoint', 'PGA._resp')) + ggtitle('T cell') + xlab('condition'),
+  create_expression_plot(average_expression_per_groups_higher[average_expression_per_groups_higher[['cell_type_cd']] == 'CD4', ], gene = 'ITGA4', group_columns = c('timepoint', 'PGA._resp')) + ggtitle('CD4+T cell') + xlab('condition'),
+  create_expression_plot(average_expression_per_groups_higher[average_expression_per_groups_higher[['cell_type_cd']] == 'CD8', ], gene = 'ITGA4', group_columns = c('timepoint', 'PGA._resp')) + ggtitle('CD8+T cell') + xlab('condition'),
+  create_expression_plot(average_expression_per_groups[average_expression_per_groups[['celltype_ecco']] == 'T_cells', ], gene = 'ITGA7', group_columns = c('timepoint', 'PGA._resp')) + ggtitle('T cell') + xlab('condition'),
+  create_expression_plot(average_expression_per_groups_higher[average_expression_per_groups_higher[['cell_type_cd']] == 'CD4', ], gene = 'ITGA7', group_columns = c('timepoint', 'PGA._resp')) + ggtitle('CD4+T cell') + xlab('condition'),
+  create_expression_plot(average_expression_per_groups_higher[average_expression_per_groups_higher[['cell_type_cd']] == 'CD8', ], gene = 'ITGA7', group_columns = c('timepoint', 'PGA._resp')) + ggtitle('CD8+T cell') + xlab('condition'),
+  nrow = 2,
+  ncol = 3
+)
+```
+
+```{r plot_expression_T, include=TRUE, fig.width=4, fig.height=4}
+
+# and the monocytes as well
+plot_grid(
+  create_expression_plot(average_expression_per_groups_mono[average_expression_per_groups_mono[['cell_type_final']] == 'Inflammatory.Monocytes', ], gene = 'ITGAX', group_columns = c('timepoint', 'PGA._resp')) + ggtitle('Inflammatory Monocytes') + xlab('condition') + NoLegend(),
+  get_legend(create_expression_plot(average_expression_per_groups_mono[average_expression_per_groups_mono[['cell_type_final']] == 'Inflammatory.Monocytes', ], gene = 'ITGAX', group_columns = c('timepoint', 'PGA._resp'))+ guides(fill=guide_legend(ncol=1))),
+  create_expression_plot(average_expression_per_groups_mono[average_expression_per_groups_mono[['cell_type_final']] == 'Inflammatory.Monocytes', ], gene = 'ITGB2', group_columns = c('timepoint', 'PGA._resp')) + ggtitle('Inflammatory Monocytes') + xlab('condition') + NoLegend(),
+  ncol = 2,
+  nrow = 2
+)
+
+```

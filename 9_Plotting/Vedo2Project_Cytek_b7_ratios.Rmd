@@ -1,0 +1,249 @@
+---
+title: "Vedo2Project Cytek b7 pos ratios"
+author: "Paola Pibiri"
+output: html_document
+---
+
+```{r header, include=FALSE}
+############################################################################################################################
+# Authors: Paola Pibiri
+# Name: Vedo2Project_Cytek_b7_ratios.Rmd
+# Function: check the cell-cell communications between 1 receiver cell and multiple sender cells 
+############################################################################################################################
+```
+
+
+```{r libraries, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+####################
+# libraries        #
+####################
+
+library(dplyr)
+library(Seurat)
+```
+
+
+## Main code
+```{r main code, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#read the files
+# the input files contain a df with the following columns: patient number, celltype, proportion of b7 pos cells in biopsy and in pbmc (b7+/tot celltype per patient), the ratio of proportion_biopsy/proportion in pbmc
+
+input.dir <- "/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/new_results_b7_proportion/Cytek/Cytek_b7_proportions_inputs/"
+
+cytek_R_t0 <- read.table(paste0(input.dir, 'Responders_t0_cytek.tsv'), sep='\t',  header = T, dec = ',')
+cytek_R_t4 <- read.table(paste0(input.dir, 'Responders_t4_cytek.tsv'), sep='\t',  header = T, dec = ',')
+cytek_NR_t0 <- read.table(paste0(input.dir, 'Non_responders_t0_cytek.tsv'), sep='\t',  header = T, dec = ',')
+cytek_NR_t4 <- read.table(paste0(input.dir, 'Non_responders_t4_cytek.tsv'), sep='\t',  header = T, dec = ',')
+
+# calculate the log ratio
+cytek_R_t0$ratio_log <- -log2(cytek_R_t0$proportion_PBMC/cytek_R_t0$proportion_biopsy)
+cytek_R_t4$ratio_log <- -log2(cytek_R_t4$proportion_PBMC/cytek_R_t4$proportion_biopsy)
+cytek_NR_t0$ratio_log <- -log2(cytek_NR_t0$proportion_PBMC/cytek_NR_t0$proportion_biopsy)
+cytek_NR_t4$ratio_log <- -log2(cytek_NR_t4$proportion_PBMC/cytek_NR_t4$proportion_biopsy)
+
+#filter out the cases of inf and -inf for each of them
+out.dir <- '/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/new_results_b7_proportion/Cytek/'
+
+cytek_R_t0_filtered <- cytek_R_t0[complete.cases(cytek_R_t0), ]
+write.table(cytek_R_t0_filtered, file= paste0(out.dir, 'R_t0_ratio_b7_pos_pbmc_vs_biopsy_cytek.tsv'), sep='\t', row.names = F, col.names = T)
+#
+cytek_R_t4_filtered <- cytek_R_t4[complete.cases(cytek_R_t4), ]
+write.table(cytek_R_t4_filtered, file= paste0(out.dir, 'R_t4_ratio_b7_pos_pbmc_vs_biopsy_cytek.tsv'), sep='\t', row.names = F, col.names = T)
+#
+cytek_NR_t0_filtered <- cytek_NR_t0[complete.cases(cytek_NR_t0), ]
+write.table(cytek_NR_t0_filtered, file= paste0(out.dir, 'NR_t0_ratio_b7_pos_pbmc_vs_biopsy_cytek.tsv'), sep='\t', row.names = F, col.names = T)
+#
+cytek_NR_t4_filtered <- cytek_NR_t4[complete.cases(cytek_NR_t4), ]
+write.table(cytek_NR_t4_filtered, file= paste0(out.dir, 'NR_t4_ratio_b7_pos_pbmc_vs_biopsy_cytek.tsv'), sep='\t', row.names = F, col.names = T)
+
+#create a condition column
+cytek_R_t0_filtered$condition <- "R-T0"
+cytek_R_t4_filtered$condition <- "R-T4"
+cytek_NR_t0_filtered$condition <- "NR-T0"
+cytek_NR_t4_filtered$condition <- "NR-T4"
+
+#remove the extra column in T4
+cytek_R_t4_filtered$PBMCs <- NULL
+cytek_NR_t4_filtered$PBMCs <- NULL
+
+
+#merge dataframes
+df <- do.call("rbind", list(cytek_R_t0_filtered, cytek_R_t4_filtered, cytek_NR_t0_filtered, cytek_NR_t4_filtered))
+#save the file
+write.table(df, file= paste0(out.dir ,'merged_df_proportion_b7.tsv'), sep='\t', row.names = F, col.names = T)
+```
+
+
+```{r wilcoxon, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#filter the datasets
+R_t0_filtered2 <- cytek_R_t0_filtered[ , c('patient', 'celltype', 'ratio_log')]
+R_t4_filtered2 <- cytek_R_t4_filtered[ , c('patient', 'celltype', 'ratio_log')]
+NR_t0_filtered2 <- cytek_NR_t0_filtered[ , c('patient', 'celltype', 'ratio_log')]
+NR_t4_filtered2 <- cytek_NR_t4_filtered[ , c('patient', 'celltype', 'ratio_log')]
+
+
+
+# calculate wilcoxon in NR t0 vs R t0
+wilcoxon_test <- NULL
+for(celltype in unique(c(NR_t0_filtered2[['celltype']], R_t0_filtered2[['celltype']]))){
+  x <- NR_t0_filtered2[NR_t0_filtered2['celltype'] == celltype, 'ratio_log']
+  y <- R_t0_filtered2[R_t0_filtered2['celltype'] == celltype, 'ratio_log']
+  if (length(x) > 0 & length(y) >0) {
+    result_wilcox <- wilcox.test(x, y, paired = FALSE, exact = FALSE)
+    P_value <- result_wilcox[["p.value"]]
+    wilcoxon_row <- data.frame(celltype=c(celltype), p=c(P_value))
+    if(is.null(wilcoxon_test)){
+      wilcoxon_test <- wilcoxon_row
+    }
+    else{
+      wilcoxon_test <- rbind(wilcoxon_test, wilcoxon_row)
+    }
+  } else {
+    print(paste0('skipping,', celltype , ' due to not enough observations: NR ', length(x), ' R ', length(y)))
+  }
+}
+
+write.table(wilcoxon_test, file= paste0(out.dir ,'wilcoxon_results_NR_vs_R_t0_b7_log_ratio.tsv') , sep='\t', col.names = T, row.names = F)
+
+
+
+# calculate wilcoxon in NR t4 vs R t4
+wilcoxon_test <- NULL
+for(celltype in unique(c(NR_t4_filtered2[['celltype']], R_t4_filtered2[['celltype']]))){
+  x <- NR_t4_filtered2[NR_t4_filtered2['celltype'] == celltype, 'ratio_log']
+  y <- R_t4_filtered2[R_t4_filtered2['celltype'] == celltype, 'ratio_log']
+  if (length(x) > 0 & length(y) >0) {
+    result_wilcox <- wilcox.test(x, y, paired = FALSE, exact = FALSE)
+    P_value <- result_wilcox[["p.value"]]
+    wilcoxon_row <- data.frame(celltype=c(celltype), p=c(P_value))
+    if(is.null(wilcoxon_test)){
+      wilcoxon_test <- wilcoxon_row
+    }
+    else{
+      wilcoxon_test <- rbind(wilcoxon_test, wilcoxon_row)
+    }
+  } else {
+    print(paste0('skipping,', celltype , ' due to not enough observations: NR ', length(x), ' R ', length(y)))
+  }
+}
+
+
+write.table(wilcoxon_test, file= paste0(out.dir ,'wilcoxon_results_NR_vs_R_t4_b7_log_ratio.tsv'), sep='\t', col.names = T, row.names = F)
+
+
+# Check R t4 vs t0
+wilcoxon_test <- NULL
+for(celltype in unique(c(R_t4_filtered2[['celltype']], R_t0_filtered2[['celltype']]))){
+  x <- R_t4_filtered2[R_t4_filtered2['celltype'] == celltype, 'ratio_log']
+  y <- R_t0_filtered2[R_t0_filtered2['celltype'] == celltype, 'ratio_log']
+  if (length(x) > 0 & length(y) >0) {
+    result_wilcox <- wilcox.test(x, y, paired = FALSE, exact = FALSE)
+    P_value <- result_wilcox[["p.value"]]
+    wilcoxon_row <- data.frame(celltype=c(celltype), p=c(P_value))
+    if(is.null(wilcoxon_test)){
+      wilcoxon_test <- wilcoxon_row
+    }
+    else{
+      wilcoxon_test <- rbind(wilcoxon_test, wilcoxon_row)
+    }
+  } else {
+    print(paste0('skipping,', celltype , ' due to not enough observations: NR ', length(x), ' R ', length(y)))
+  }
+}
+
+write.table(wilcoxon_test, file= paste0(out.dir ,'wilcoxon_results_t4_vs_t0_R_b7_log_ratio.tsv'), sep='\t', col.names = T, row.names = F)
+
+
+
+# Check NR t4 vs t0
+wilcoxon_test <- NULL
+for(celltype in unique(c(NR_t4_filtered2[['celltype']], NR_t0_filtered2[['celltype']]))){
+  x <- NR_t4_filtered2[NR_t4_filtered2['celltype'] == celltype, 'ratio_log']
+  y <- NR_t0_filtered2[NR_t0_filtered2['celltype'] == celltype, 'ratio_log']
+  if (length(x) > 0 & length(y) >0) {
+    result_wilcox <- wilcox.test(x, y, paired = FALSE, exact = FALSE)
+    P_value <- result_wilcox[["p.value"]]
+    wilcoxon_row <- data.frame(celltype=c(celltype), p=c(P_value))
+    if(is.null(wilcoxon_test)){
+      wilcoxon_test <- wilcoxon_row
+    }
+    else{
+      wilcoxon_test <- rbind(wilcoxon_test, wilcoxon_row)
+    }
+  } else {
+    print(paste0('skipping,', celltype , ' due to not enough observations: NR ', length(x), ' R ', length(y)))
+  }
+}
+
+write.table(wilcoxon_test, file= paste0(out.dir ,'wilcoxon_results_t4_vs_t0_NR_b7_log_ratio.tsv'), sep='\t', col.names = T, row.names = F)
+
+# read all the wilcoxon files and merged them
+NR_vs_R_t0 <- read.table(paste0( out.dir,'wilcoxon_results_NR_vs_R_t0_b7_log_ratio.tsv'), sep='\t',  header = T)
+NR_vs_R_t4 <- read.table(paste0( out.dir,'wilcoxon_results_NR_vs_R_t4_b7_log_ratio.tsv'), sep='\t',  header = T)
+t4_vs_t0_R <- read.table(paste0( out.dir,'wilcoxon_results_t4_vs_t0_R_b7_log_ratio.tsv'), sep='\t',  header = T)
+t4_vs_t0_NR <- read.table(paste0( out.dir,'wilcoxon_results_t4_vs_t0_NR_b7_log_ratio.tsv'), sep='\t',  header = T)
+
+#add the column of the condition
+
+NR_vs_R_t0$comparison <- "NR-T0 vs R-T0"
+NR_vs_R_t4$comparison <- "NR-T4 vs R-T4"
+t4_vs_t0_R$comparison <- "R-T4 vs R-T0"
+t4_vs_t0_NR$comparison <- "NR-T4 vs NR-T0"
+
+#merge dataftames
+df_wilcoxon <- do.call("rbind", list(NR_vs_R_t0, NR_vs_R_t4, t4_vs_t0_R, t4_vs_t0_NR))
+
+write.table(df_wilcoxon, file= paste0(out.dir ,'wilcoxon_results_final_table.tsv'), sep='\t', col.names = T, row.names = F)
+```
+
+
+## Boxplots
+```{r boxplot, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# melt the 4 datasets 
+R_t0_melt <-  melt(R_t0_filtered2)
+R_t4_melt <-  melt(R_t4_filtered2)
+NR_t0_melt <-  melt(NR_t0_filtered2)
+NR_t4_melt <-  melt(NR_t4_filtered2)
+
+# add the condition column for each dataset
+
+R_t0_melt$condition <- "R-T0"
+R_t4_melt$condition <- "R-T4"
+NR_t0_melt$condition <- "NR-T0"
+NR_t4_melt$condition <- "NR-T4"
+
+# run the rbind function across datasets 
+merged <- do.call("rbind", list(R_t0_melt, R_t4_melt, NR_t0_melt, NR_t4_melt))
+
+
+#remove NA, Inf or -inf 
+
+merged_filtered <- merged
+
+merged_filtered <- merged_filtered[!is.na(merged_filtered$value), ]
+merged_filtered <- merged_filtered[is.finite(merged_filtered$value), ]
+
+#create the plot
+
+merged_filtered$condition <- factor(merged_filtered$condition, levels = c("R-T0", "NR-T0", "R-T4", "NR-T4"))
+
+
+ggplot(merged_filtered, aes(x=condition, y=value, fill=condition)) + 
+  geom_boxplot(outlier.shape = NA)+
+  geom_jitter(size = 0.8, width = 0.15, alpha = 0.5) +
+  facet_wrap( ~ celltype, scales="free") +
+  theme(panel.background = element_rect(fill = 'white', color='black')) +
+  theme(strip.background = element_rect(fill="white"),
+        strip.text = element_text(colour="black"), panel.grid.major = element_line(size = 0.5, linetype = 'solid',
+                                                                                   colour = "white")) +
+  
+  scale_fill_manual(values = list('R-T0' = 'white', 'R-T4' = 'white', 'NR-T0' = 'gray', 'NR-T4' = 'gray'))
+```
+

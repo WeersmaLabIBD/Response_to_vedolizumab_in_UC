@@ -10,14 +10,17 @@ For each different step of the scRNAseq analysis, separate codes were generated.
 
 - R >= 3.6.1
 - Seurat >= 3.1
+- Python >= 3.7.4
+- numpy 1.19.5
+- pandas 1.2.1
 
 
 External tools used were:
 
 - Souporcell v.1: https://github.com/wheaton5/souporcell
 - Cellranger v.3.0.2: https://support.10xgenomics.com/single-cell-gene-expression/software/pipelines/latest/installation
-- Azimuth v: https://azimuth.hubmapconsortium.org/
-- fido v.1.0.2:
+- fido v.1.0.2: https://jsilve24.github.io/fido/articles/introduction-to-fido.html
+- scCODA v.0.1.9 https://github.com/theislab/scCODA/blob/master/docs/source/getting_started.ipynb
 - ClusterProfiler v.4.4.4: https://learn.gencore.bio.nyu.edu/rna-seq-analysis/gene-set-enrichment-analysis/
 - Cellchat v.1.4.0: http://www.cellchat.org/
 - nichenetr v.1.1.0: https://github.com/saeyslab/nichenetr/blob/master/vignettes/seurat_steps.md
@@ -44,5 +47,7 @@ steps should be done in this order, to replicate the results
 
 The 1_Alignment contains the script 'Cellranger_script' which would create jobs to run each 10x lane through CellRanger.
 
-## Demultiplexing, double detection, and quality control (QC)
+## Hardware
+
+Analyses were performed on either a 2021 MacBook Pro (32GB), the Gearshift cluster http://docs.gcc.rug.nl/gearshift/cluster/ 
 

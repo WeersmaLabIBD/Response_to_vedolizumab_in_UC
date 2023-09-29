@@ -1,0 +1,173 @@
+---
+title: "Vedo2Project Plasma proportion"
+author: "Paola Pibiri"
+output: html_document
+---
+
+```{r header, include=FALSE}
+############################################################################################################################
+# Authors: Paola Pibiri
+# Name: Vedo2Project_Plasma_proportion.Rmd
+# Function: check the proportion of each specific cell inside the plasma compartment and verify their different abundance across conditions 
+############################################################################################################################
+
+```
+
+
+```{r libraries, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+####################
+# libraries        #
+####################
+
+library(dplyr)
+library(nichenetr)
+library(Seurat)
+library(tidyverse)
+
+```
+
+
+
+```{r functions, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#divide in the columns 
+add_data_from_rownames <- function(table_w_conditions, condition_column='condition', split_char='_', column_names=NULL){
+  # get the data to split
+  data_to_split <- table_w_conditions[[condition_column]]
+  # create an emtpy dataframe
+  metadata_dataframe <- NULL
+  # check each rowname
+  for(i in 1 : length(data_to_split)){
+    # get the value
+    value <- data_to_split[i]
+    # split the data
+    split_data <- strsplit(value, split_char)
+    # initialize the dataframe
+    if(is.null(metadata_dataframe)){
+      metadata_dataframe <- data.frame(matrix(, nrow=length(data_to_split), ncol = length(split_data[[1]])))
+    }
+    # add this row
+    metadata_dataframe[i, ] <- split_data[[1]]
+  }
+  # add the column names if requested
+  if(!is.null(column_names)){
+    colnames(metadata_dataframe) <- column_names
+  }
+  # add to the original data
+  table_w_conditions <- cbind(table_w_conditions, metadata_dataframe)
+  return(table_w_conditions)
+}
+
+```
+
+## Main calculations on the Plasma proportions
+```{r main code, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# read the seurat object
+vedo2 <- readRDS('/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/seurat_preprocess_samples/objects/vedo2_remerged_resct_20230215.rds')
+
+#subset for having only the IgA, IgG, IgM and Ig negative at T0
+object.sub <- vedo2[ , vedo2@meta.data$celltype_final %in% c('IgG', 'IgA', 'IgM', 'Ig_negative') & vedo2@meta.data$timepoint == 'T0']
+
+#create a table with the counts of aall the IgG and the total
+
+object.sub@meta.data$condition <- paste0(object.sub@meta.data$Final_HTO, '_', object.sub@meta.data$timepoint, '_', object.sub@meta.data$PGA._resp)
+# create the data structure for scCODA and cell abundance analysis
+object.sub.counts=as.data.frame.matrix(table(object.sub@meta.data[, c('condition', 'celltype_final')]))
+#call the column with the covariate as condition
+object.sub.counts['condition'] <- rownames(object.sub.counts)
+# change the location of the condition column
+object.sub.counts <- object.sub.counts[, c('condition', setdiff(colnames(object.sub.counts), 'condition'))]
+
+#divide the column with multiple conditions, into more columns each with a condition
+data <- add_data_from_rownames(table_w_conditions= object.sub.counts, column_names=c('Final_HTO', 'timepoint', 'response'))
+
+#make null the not relevant columns 
+data$Final_HTO <- NULL
+data$condition <- NULL
+
+#create a column that consider together only timepoint and response
+data$condition <- paste0(data$timepoint, '_', data$response)
+
+#then, make null the timepoint and response column
+data$timepoint <- NULL
+data$response <- NULL
+
+
+#create a new column for the total number of plasma cells per row
+data$tot_plasma <- rowSums(data[,1:4])
+
+write.table(data, '/groups/umcg-weersma/tmp01/projects/vedopredict2/biopsies/ongoing/proportion_plasma_cells_biopsy/proportion_plasma_biopsy.tsv', sep = '\t', col.names = T)
+
+
+###
+count <- data
+condition <- count[,c('condition')]
+count <- count[, setdiff(colnames(count), c('condition'))]
+
+#caculate the ratios
+total_row = apply(count, 1, sum)
+pcts = lapply(count, function(x) {
+  x/total_row
+})
+
+frequencies = as.data.frame(pcts)
+frequencies2 <- frequencies
+frequencies2[['condition']] <- condition
+frequencies2 <- frequencies2[order(frequencies2$condition, decreasing = TRUE),]
+
+```
+
+
+## Boxplot 
+```{r boxplot, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#melt the df
+df1 =  melt(frequencies2)
+
+#rename the columns of the df1
+colnames(df1) <- c('condition', 'celltype', 'proportion')
+df1$condition <- factor(df1$condition, levels = c("T0_no", "T0_yes"))
+
+#boxplot
+ggplot(df1, aes(x=condition, y=proportion, fill=condition)) + 
+  geom_boxplot(outlier.shape = NA)+
+  geom_jitter(size = 0.8, width = 0.15, alpha = 0.5) +
+  #ylim(0, 0.15) +
+  #geom_boxplot(width=0.1, outlier.size = 0.5) +
+  facet_wrap( ~ celltype, scales="free") +
+  theme(panel.background = element_rect(fill = 'white', color='black')) +
+  theme(strip.background = element_rect(fill="white"),
+        strip.text = element_text(colour="black"), panel.grid.major = element_line(size = 0.5, linetype = 'solid',
+                                                                                   colour = "white")) +
+  #theme_bw(base_size = 14) + 
+  #scale_fill_brewer(palette="Set1")+
+  #stat_boxplot(geom = "errorbar", width = 0.25)+
+  scale_fill_manual(values = list('T0_no' = 'white', 'T0_yes' = 'gray'))
+
+```
+
+## Wiocoxon Test
+```{r boxplot, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+wilcoxon_test <- NULL
+for(celltype in colnames(frequencies2)){
+  result_wilcox <- wilcox.test(frequencies2[frequencies2$condition == 'T0_no', celltype], frequencies2[frequencies2$condition == 'T0_yes', celltype], paired = FALSE, exact = FALSE)
+  P_value <- result_wilcox[["p.value"]]
+  print(celltype)
+  print(P_value)
+  wilcoxon_row <- data.frame(celltype=c(celltype), p=c(P_value))
+  if(is.null(wilcoxon_test)){
+    wilcoxon_test <- wilcoxon_row
+  }
+  else{
+    wilcoxon_test <- rbind(wilcoxon_test, wilcoxon_row)
+  }
+}
+
+```

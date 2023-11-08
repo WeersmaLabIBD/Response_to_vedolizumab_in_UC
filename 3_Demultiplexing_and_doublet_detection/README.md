@@ -2,9 +2,6 @@
 
 This repository contains a pipeline for demultiplexing and doublet detection from Vedolizumab-Predict scRNA-seq data.
 
-'Souporcell_analysis' provides an example of how the functions as a pipeline for assignments of cells to the donor. 
-
-'Hashtag_calling.R' provides the functions for preprocessing scRNA-seq data. The script processes data from CellRanger and integrates Souporcell toolkit results for genotype deconvolution.
 
 ## Souporcell Analysis Pipeline 
 
